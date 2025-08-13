@@ -37,7 +37,7 @@ func main() {
 
 	// 3. --- Gather all typos ---
 	path := flag.Arg(0)
-	allTypos, err := findTypos(path, dictionary, excludePatterns)
+	allTypos, err := runConcurrentChecker(path, dictionary, excludePatterns)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error processing path: %v\n", err)
 		os.Exit(1)

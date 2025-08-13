@@ -4,78 +4,90 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
-	"unicode"
+	"sync"
 )
 
 var wordRegex = regexp.MustCompile(`\w+`)
 
-// MisspelledWord holds the details of a spelling error.
 type MisspelledWord struct {
 	Word       string
 	LineNumber int
 	Column     int
 }
 
-// findTypos is a high-level function to check a path (file or directory).
-func findTypos(path string, dictionary map[string]struct{}, excludePatterns []string) (map[string][]MisspelledWord, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
+type CheckResult struct {
+	FilePath string
+	Typos    []MisspelledWord
+}
+
+func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, excludePatterns []string) (map[string][]MisspelledWord, error) {
+	jobs := make(chan string, 100)
+	results := make(chan CheckResult, 100)
+	var wg sync.WaitGroup
+
+	numWorkers := runtime.NumCPU()
+	for i := 0; i < numWorkers; i++ {
+		go worker(&wg, jobs, results, dictionary)
 	}
+
+	go func() {
+		filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+			if !info.IsDir() {
+				wg.Add(1)
+				jobs <- path
+			}
+			return nil
+		})
+		close(jobs)
+	}()
+
 	allTypos := make(map[string][]MisspelledWord)
-	if info.IsDir() {
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return nil, err
-		}
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			filePath := filepath.Join(path, entry.Name())
-			exclude, _ := shouldExclude(filePath, excludePatterns)
+	resultsWg := sync.WaitGroup{}
+	resultsWg.Add(1)
+	go func() {
+		defer resultsWg.Done()
+		for result := range results {
+			exclude, _ := shouldExclude(result.FilePath, excludePatterns)
 			if exclude {
-				fmt.Printf("Skipping excluded file: %s\n", filePath)
+				fmt.Printf("Skipping excluded file: %s\n", result.FilePath)
 				continue
 			}
-			typos := checkFile(filePath, dictionary)
-			if len(typos) > 0 {
-				allTypos[filePath] = typos
+
+			isBinary, _ := isLikelyBinary(result.FilePath)
+			if isBinary {
+				fmt.Printf("Skipping likely binary file: %s\n", result.FilePath)
+				continue
+			}
+
+			if len(result.Typos) > 0 {
+				allTypos[result.FilePath] = result.Typos
 			}
 		}
-	} else {
-		exclude, _ := shouldExclude(path, excludePatterns)
-		if exclude {
-			fmt.Printf("Skipping excluded file: %s\n", path)
-		} else {
-			typos := checkFile(path, dictionary)
-			if len(typos) > 0 {
-				allTypos[path] = typos
-			}
-		}
-	}
+	}()
+
+	wg.Wait()
+	close(results)
+	resultsWg.Wait()
+
 	return allTypos, nil
 }
 
-// checkFile contains the logic to spell-check a single file.
+func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary map[string]struct{}) {
+	for path := range jobs {
+		typos := checkFile(path, dictionary)
+		results <- CheckResult{FilePath: path, Typos: typos}
+		wg.Done()
+	}
+}
+
 func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord {
-	isBinary, err := isLikelyBinary(filePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not read file %s: %v\n", filePath, err)
-		return nil
-	}
-	if isBinary {
-		fmt.Fprintf(os.Stdout, "Skipping likely binary file: %s\n", filePath)
-		return nil
-	}
 	file, err := os.Open(filePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening file %s: %v\n", filePath, err)
 		return nil
 	}
 	defer file.Close()
@@ -88,10 +100,14 @@ func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord
 		line := scanner.Text()
 		allMatchesIndices := wordRegex.FindAllStringIndex(line, -1)
 		for _, indices := range allMatchesIndices {
-			start, end := indices[0], indices[1]
-			word := line[start:end]
+			start := indices[0]
+			word := line[indices[0]:indices[1]]
 			if !isWordCorrect(word, dictionary) {
-				misspelledWords = append(misspelledWords, MisspelledWord{Word: word, LineNumber: lineNumber, Column: start + 1})
+				misspelledWords = append(misspelledWords, MisspelledWord{
+					Word:       word,
+					LineNumber: lineNumber,
+					Column:     start + 1, // DEFINITIVE FIX: 1-based column from 0-based index.
+				})
 			}
 		}
 	}
@@ -104,14 +120,11 @@ func isWordCorrect(word string, dictionary map[string]struct{}) bool {
 }
 
 func shouldExclude(filePath string, patterns []string) (bool, error) {
-	if len(patterns) == 0 {
-		return false, nil
-	}
 	fileName := filepath.Base(filePath)
 	for _, pattern := range patterns {
 		matched, err := filepath.Match(pattern, fileName)
 		if err != nil {
-			return false, fmt.Errorf("invalid exclude pattern '%s': %w", pattern, err)
+			return false, err
 		}
 		if matched {
 			return true, nil
@@ -127,21 +140,9 @@ func isLikelyBinary(filePath string) (bool, error) {
 	}
 	defer file.Close()
 	buffer := make([]byte, 512)
-	n, err := file.Read(buffer)
-	if err != nil && err != io.EOF {
-		return false, err
-	}
+	n, _ := file.Read(buffer)
 	buffer = buffer[:n]
 	if bytes.Contains(buffer, []byte{0}) {
-		return true, nil
-	}
-	nonPrintable := 0
-	for _, b := range buffer {
-		if !unicode.IsPrint(rune(b)) && !unicode.IsSpace(rune(b)) {
-			nonPrintable++
-		}
-	}
-	if n > 0 && float64(nonPrintable)/float64(n) > 0.3 {
 		return true, nil
 	}
 	return false, nil
