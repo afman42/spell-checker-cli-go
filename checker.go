@@ -8,71 +8,98 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"unicode"
 )
 
 var wordRegex = regexp.MustCompile(`\w+`)
 
-// MisspelledWord holds the details of a spelling error.
 type MisspelledWord struct {
 	Word       string
 	LineNumber int
 	Column     int
 }
 
-// findTypos is a high-level function to check a path (file or directory).
-func findTypos(path string, dictionary map[string]struct{}, excludePatterns []string) (map[string][]MisspelledWord, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
+// CheckResult holds the result of a single file check.
+type CheckResult struct {
+	FilePath string
+	Typos    []MisspelledWord
+}
+
+// runConcurrentChecker is the new orchestrator for the entire spell-checking process.
+func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, excludePatterns []string) (map[string][]MisspelledWord, error) {
+	// --- Setup Channels and WaitGroup ---
+	jobs := make(chan string, 100)
+	results := make(chan CheckResult, 100)
+	var wg sync.WaitGroup
+
+	// --- Start Worker Goroutines ---
+	numWorkers := runtime.NumCPU() // Use a worker for each CPU core
+	for i := 0; i < numWorkers; i++ {
+		go worker(&wg, jobs, results, dictionary)
 	}
-	allTypos := make(map[string][]MisspelledWord)
-	if info.IsDir() {
-		entries, err := os.ReadDir(path)
+
+	// --- Start a goroutine to walk the file path and send jobs ---
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			// Skip directories, excluded files, and binary files
+			if !info.IsDir() {
+				exclude, _ := shouldExclude(path, excludePatterns)
+				isBinary, _ := isLikelyBinary(path)
+				if exclude {
+					fmt.Printf("Skipping excluded file: %s\n", path)
+					return nil
+				}
+				if isBinary {
+					fmt.Printf("Skipping likely binary file: %s\n", path)
+					return nil
+				}
+				wg.Add(1)
+				jobs <- path
+			}
+			return nil
+		})
 		if err != nil {
-			return nil, err
+			fmt.Fprintf(os.Stderr, "Error walking path: %v\n", err)
 		}
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			filePath := filepath.Join(path, entry.Name())
-			exclude, _ := shouldExclude(filePath, excludePatterns)
-			if exclude {
-				fmt.Printf("Skipping excluded file: %s\n", filePath)
-				continue
-			}
-			typos := checkFile(filePath, dictionary)
-			if len(typos) > 0 {
-				allTypos[filePath] = typos
+		close(jobs) // Close jobs channel when walking is done
+	}()
+
+	// --- Start a goroutine to collect results ---
+	allTypos := make(map[string][]MisspelledWord)
+	go func() {
+		for result := range results {
+			if len(result.Typos) > 0 {
+				allTypos[result.FilePath] = result.Typos
 			}
 		}
-	} else {
-		exclude, _ := shouldExclude(path, excludePatterns)
-		if exclude {
-			fmt.Printf("Skipping excluded file: %s\n", path)
-		} else {
-			typos := checkFile(path, dictionary)
-			if len(typos) > 0 {
-				allTypos[path] = typos
-			}
-		}
-	}
+	}()
+
+	// --- Wait for all jobs to finish and close results channel ---
+	wg.Wait()
+	close(results)
+
 	return allTypos, nil
 }
 
-// checkFile contains the logic to spell-check a single file.
+// worker is a goroutine that pulls file paths from the jobs channel and processes them.
+func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary map[string]struct{}) {
+	for path := range jobs {
+		typos := checkFile(path, dictionary)
+		results <- CheckResult{FilePath: path, Typos: typos}
+		wg.Done()
+	}
+}
+
+// checkFile now just focuses on checking one file. The skipping logic has been moved up.
 func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord {
-	isBinary, err := isLikelyBinary(filePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not read file %s: %v\n", filePath, err)
-		return nil
-	}
-	if isBinary {
-		fmt.Fprintf(os.Stdout, "Skipping likely binary file: %s\n", filePath)
-		return nil
-	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening file %s: %v\n", filePath, err)
@@ -98,6 +125,7 @@ func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord
 	return misspelledWords
 }
 
+// --- isWordCorrect, shouldExclude, isLikelyBinary remain the same ---
 func isWordCorrect(word string, dictionary map[string]struct{}) bool {
 	_, exists := dictionary[strings.ToLower(word)]
 	return exists
