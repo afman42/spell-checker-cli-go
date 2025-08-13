@@ -47,11 +47,12 @@ jobs:
       - name: Make Directory Temporary
         run: mkdir ./tmp/
 
+        # set env CI=false because error:Procces exit code 1
       - name: Testing App CLI And Execute File Export report.txt
-        run: set -e ./bin/linux_amd64/spellchecker-linux-amd64 -output "./tmp/report.txt" ./test/kafka.txt
+        run: CI=false ./bin/linux_amd64/spellchecker-linux-amd64 -output "./tmp/report.txt" ./test/kafka.txt
 
       - name: Testing App CLI And From Directory Export report-directory.txt
-        run: set -e ./bin/linux_amd64/spellchecker-linux-amd64 -output "./tmp/report-directory.txt" ./test/
+        run: CI=false ./bin/linux_amd64/spellchecker-linux-amd64 -output "./tmp/report-directory.txt" ./test/
 
       - name: Upload Folder Temporary
         uses: actions/upload-artifact@v4
