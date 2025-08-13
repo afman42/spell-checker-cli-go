@@ -35,7 +35,7 @@ Usage of ./spellchecker:
 ./spellchecker -output my_archive.html my_document.txt
 ```
 
-example file `my_dict.csv`:
+example file `my_dict.csv` :
 
 ```bash
 word,pos,def
