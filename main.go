@@ -10,14 +10,12 @@ import (
 )
 
 func main() {
-	// 1. Define all flags, including the new -format flag
 	dictPath := flag.String("dict", "", "Optional: path to a custom CSV dictionary file.")
 	excludeStr := flag.String("exclude", "", "Optional: comma-separated list of file patterns to exclude.")
 	outputPath := flag.String("output", "", "Optional: path to an output file.")
 	outputFormat := flag.String("format", "", "Optional: output format (txt, html). Overrides filename extension.")
 	flag.Parse()
 
-	// 2. --- Setup ---
 	var excludePatterns []string
 	if *excludeStr != "" {
 		excludePatterns = strings.Split(*excludeStr, ",")
@@ -35,7 +33,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. --- Gather all typos ---
 	path := flag.Arg(0)
 	allTypos, err := runConcurrentChecker(path, dictionary, excludePatterns)
 	if err != nil {
@@ -43,8 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 4. --- Reporting ---
-	var outputWriter io.Writer = os.Stdout // Default to console
+	var outputWriter io.Writer = os.Stdout
 	if *outputPath != "" {
 		file, err := os.Create(*outputPath)
 		if err != nil {
@@ -52,26 +48,19 @@ func main() {
 			os.Exit(1)
 		}
 		defer file.Close()
-		outputWriter = file // Direct output to the file
+		outputWriter = file
 		fmt.Printf("Report will be saved to: %s\n", *outputPath)
 	}
 
-	// Determine the output format with improved logic
 	isHTML := false
-	// Priority 1: Check the explicit -format flag
 	if strings.ToLower(*outputFormat) == "html" {
 		isHTML = true
-	} else if strings.ToLower(*outputFormat) == "txt" {
-		isHTML = false
 	} else if *outputFormat == "" && *outputPath != "" {
-		// Priority 2: If format is not set, check the output file's extension
-		ext := strings.ToLower(filepath.Ext(*outputPath))
-		if ext == ".html" {
+		if strings.ToLower(filepath.Ext(*outputPath)) == ".html" {
 			isHTML = true
 		}
 	}
 
-	// Generate the report based on the determined format
 	if isHTML {
 		generateHTMLReport(outputWriter, allTypos)
 	} else {
@@ -79,6 +68,6 @@ func main() {
 	}
 
 	if len(allTypos) > 0 {
-		os.Exit(1) // Exit with non-zero status if typos were found
+		os.Exit(1)
 	}
 }
