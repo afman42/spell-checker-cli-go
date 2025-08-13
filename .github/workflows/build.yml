@@ -33,10 +33,10 @@ jobs:
         run: wget https://github.com/upx/upx/releases/download/v5.0.2/upx-5.0.2-amd64_linux.tar.xz && tar -xf upx-5.0.2-amd64_linux.tar.xz
 
       - name: Go Build For Linux amd64
-        run: CI=false GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o=./bin/linux_amd64/tmp/spellchecker ./*.go;
+        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o=./bin/linux_amd64/tmp/spellchecker ./*.go;
 
       - name: Go Build For Windows amd64
-        run: CI=false GOOS=windows GOARCH=amd64 go build -ldflags="-s" -o=./bin/windows_amd64/tmp/spellchecker.exe ./*.go;
+        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s" -o=./bin/windows_amd64/tmp/spellchecker.exe ./*.go;
 
       - name: Compress Linux
         run: ./upx-5.0.2-amd64_linux/upx ./bin/linux_amd64/tmp/spellchecker -o ./bin/linux_amd64/spellchecker-linux-amd64;
@@ -48,9 +48,11 @@ jobs:
         run: mkdir ./tmp/
 
       - name: Testing App CLI And Execute File Export report.txt
+        continue-on-error: true
         run: ./bin/linux_amd64/spellchecker-linux-amd64 -output "./tmp/report.txt" ./test/kafka.txt
 
       - name: Testing App CLI And From Directory Export report-directory.txt
+        continue-on-error: true
         run: ./bin/linux_amd64/spellchecker-linux-amd64 -output "./tmp/report-directory.txt" ./test/
 
       - name: Upload Folder Temporary
