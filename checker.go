@@ -20,71 +20,77 @@ type MisspelledWord struct {
 	Column     int
 }
 
+// CheckResult holds the result of checking a single file.
 type CheckResult struct {
 	FilePath string
 	Typos    []MisspelledWord
 }
 
+// runConcurrentChecker is the main orchestrator for the concurrent process.
 func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, excludePatterns []string) (map[string][]MisspelledWord, error) {
+	// 1. Set up channels for jobs and results.
 	jobs := make(chan string, 100)
 	results := make(chan CheckResult, 100)
 	var wg sync.WaitGroup
 
-	numWorkers := runtime.NumCPU()
+	// 2. Start the worker pool.
+	numWorkers := runtime.NumCPU() // Use one worker per available CPU core.
 	for i := 0; i < numWorkers; i++ {
+		wg.Add(1) // Add a worker to the wait group.
 		go worker(&wg, jobs, results, dictionary)
 	}
 
+	// 3. Start a goroutine to walk the file system and send jobs.
 	go func() {
 		filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 			if !info.IsDir() {
-				wg.Add(1)
 				jobs <- path
 			}
 			return nil
 		})
-		close(jobs)
+		close(jobs) // CRITICAL: Close the jobs channel when the walk is done.
 	}()
 
-	allTypos := make(map[string][]MisspelledWord)
-	resultsWg := sync.WaitGroup{}
-	resultsWg.Add(1)
+	// 4. Start a goroutine to wait for all workers to finish, then close the results channel.
+	//    This is key to preventing the race condition.
 	go func() {
-		defer resultsWg.Done()
-		for result := range results {
-			exclude, _ := shouldExclude(result.FilePath, excludePatterns)
-			if exclude {
-				fmt.Printf("Skipping excluded file: %s\n", result.FilePath)
-				continue
-			}
-
-			isBinary, _ := isLikelyBinary(result.FilePath)
-			if isBinary {
-				fmt.Printf("Skipping likely binary file: %s\n", result.FilePath)
-				continue
-			}
-
-			if len(result.Typos) > 0 {
-				allTypos[result.FilePath] = result.Typos
-			}
-		}
+		wg.Wait()
+		close(results)
 	}()
 
-	wg.Wait()
-	close(results)
-	resultsWg.Wait()
+	// 5. Collect all results from the results channel until it's closed.
+	allTypos := make(map[string][]MisspelledWord)
+	for result := range results {
+		// Filter out skipped files here, after they've been processed.
+		exclude, _ := shouldExclude(result.FilePath, excludePatterns)
+		if exclude {
+			fmt.Printf("Skipping excluded file: %s\n", result.FilePath)
+			continue
+		}
+		isBinary, _ := isLikelyBinary(result.FilePath)
+		if isBinary {
+			fmt.Printf("Skipping likely binary file: %s\n", result.FilePath)
+			continue
+		}
+
+		if len(result.Typos) > 0 {
+			allTypos[result.FilePath] = result.Typos
+		}
+	}
 
 	return allTypos, nil
 }
 
+// worker is a goroutine that pulls file paths from the jobs channel and processes them.
 func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary map[string]struct{}) {
+	defer wg.Done() // Signal that this worker is finished when it exits.
 	for path := range jobs {
 		typos := checkFile(path, dictionary)
 		results <- CheckResult{FilePath: path, Typos: typos}
-		wg.Done()
 	}
 }
 
+// checkFile contains the core logic to find typos in one file.
 func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -106,13 +112,15 @@ func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord
 				misspelledWords = append(misspelledWords, MisspelledWord{
 					Word:       word,
 					LineNumber: lineNumber,
-					Column:     start + 1, // DEFINITIVE FIX: 1-based column from 0-based index.
+					Column:     start + 1,
 				})
 			}
 		}
 	}
 	return misspelledWords
 }
+
+// --- Helper functions remain the same ---
 
 func isWordCorrect(word string, dictionary map[string]struct{}) bool {
 	_, exists := dictionary[strings.ToLower(word)]
