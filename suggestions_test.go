@@ -30,6 +30,7 @@ func TestLevenshteinDistance(t *testing.T) {
 func TestGenerateSuggestions(t *testing.T) {
 	mockDictionary := map[string]struct{}{
 		"hello": {}, "world": {}, "error": {}, "errors": {}, "go": {}, "golang": {},
+		"state-of-the-art": {}, // Added for hyphenation test
 	}
 
 	testCases := []struct {
@@ -37,13 +38,12 @@ func TestGenerateSuggestions(t *testing.T) {
 		expected []string
 	}{
 		{"wrold", []string{"world"}},
-		// FIX: Correctly expect both "error" and "errors".
 		{"eror", []string{"error", "errors"}},
 		{"errror", []string{"error", "errors"}},
-		// FIX: Correctly expect only "golang" (distance to "go" is 3).
 		{"golan", []string{"golang"}},
-		// This now passes because the function returns a non-nil empty slice.
 		{"xyz", []string{}},
+		// NEW: Test case for a misspelled hyphenated word.
+		{"state-of-the-artt", []string{"state-of-the-art"}},
 	}
 
 	for _, tc := range testCases {

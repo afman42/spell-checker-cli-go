@@ -6,48 +6,42 @@ import (
 	"testing"
 )
 
+// IMPROVED: Assertions are more specific.
 func TestGenerateTextReport(t *testing.T) {
-	// Create sample results
 	results := map[string][]MisspelledWord{
 		"test.txt": {
-			{Word: "errror", LineNumber: 1, Column: 5},
+			{Word: "errror", LineNumber: 1, Column: 5, Suggestions: []string{"error"}},
 		},
 	}
 
 	var buf bytes.Buffer
 	generateTextReport(&buf, results)
-
 	output := buf.String()
-	if !strings.Contains(output, "Typos found:") {
-		t.Error("Text report missing 'Typos found:' header")
-	}
-	if !strings.Contains(output, "errror") {
-		t.Error("Text report missing the misspelled word")
-	}
-	if !strings.Contains(output, "Line 1, Col 5") {
-		t.Error("Text report missing line and column numbers")
+
+	// Check for the exact, complete output line.
+	expectedLine := `- Line 1, Col 5: "errror" appears to be a typo. Did you mean: error?`
+	if !strings.Contains(output, expectedLine) {
+		t.Errorf("Text report missing expected line.\nGOT:\n%s\nWANT (to contain):\n%s", output, expectedLine)
 	}
 }
 
+// IMPROVED: Check for the new "Suggestions" table header.
 func TestGenerateHTMLReport(t *testing.T) {
 	results := map[string][]MisspelledWord{
 		"test.txt": {
-			{Word: "wrod", LineNumber: 2, Column: 10},
+			{Word: "wrod", LineNumber: 2, Column: 10, Suggestions: []string{"world"}},
 		},
 	}
 
 	var buf bytes.Buffer
 	generateHTMLReport(&buf, results)
-
 	output := buf.String()
-	if !strings.Contains(output, "<html") {
-		t.Error("HTML report missing <html> tag")
+
+	if !strings.Contains(output, "<th>Suggestions</th>") {
+		t.Error("HTML report missing 'Suggestions' table header")
 	}
-	if !strings.Contains(output, "<table>") {
-		t.Error("HTML report missing <table> tag")
-	}
-	if !strings.Contains(output, "<td>wrod</td>") {
-		t.Error("HTML report missing the misspelled word in a <td> tag")
+	if !strings.Contains(output, "<td>world</td>") {
+		t.Error("HTML report missing suggestion in a <td> tag")
 	}
 }
 

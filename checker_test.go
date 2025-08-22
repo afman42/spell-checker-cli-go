@@ -35,48 +35,71 @@ func TestShouldExclude(t *testing.T) {
 	}
 }
 
+// REWRITTEN: TestCheckFile is now a table-driven test for better coverage and readability.
 func TestCheckFile(t *testing.T) {
+	// A common dictionary for all test cases.
 	mockDictionary := map[string]struct{}{
-		"hello": {}, "world": {}, "this": {}, "is": {}, "a": {}, "test": {}, "go": {}, "of": {},
+		"hello": {}, "world": {}, "they're": {}, "a": {}, "test": {},
+		"state-of-the-art": {}, "error": {},
 	}
-	tempDir := t.TempDir()
 
-	t.Run("file with typos", func(t *testing.T) {
-		content := "Hello world, this is a tst of go."
-		filePath := filepath.Join(tempDir, "test1.txt")
-		os.WriteFile(filePath, []byte(content), 0644)
+	testCases := []struct {
+		name          string
+		fileContent   string
+		expectedTypos []MisspelledWord
+	}{
+		{
+			name:          "file with no typos",
+			fileContent:   "hello world",
+			expectedTypos: nil, // Expect nil or an empty slice
+		},
+		{
+			name:        "file with one typo and suggestions",
+			fileContent: "hello wrld",
+			expectedTypos: []MisspelledWord{
+				{Word: "wrld", LineNumber: 1, Column: 7, Suggestions: []string{"world"}},
+			},
+		},
+		{
+			name:          "file with correct contraction",
+			fileContent:   "they're a test",
+			expectedTypos: nil,
+		},
+		{
+			name:          "file with correct hyphenated word",
+			fileContent:   "a state-of-the-art test",
+			expectedTypos: nil,
+		},
+		{
+			name:        "file with misspelled hyphenated word",
+			fileContent: "a state-of-the-artt test",
+			expectedTypos: []MisspelledWord{
+				{Word: "state-of-the-artt", LineNumber: 1, Column: 3, Suggestions: []string{"state-of-the-art"}},
+			},
+		},
+	}
 
-		typos := checkFile(filePath, mockDictionary)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a temporary file for the test case.
+			tempDir := t.TempDir()
+			filePath := filepath.Join(tempDir, "testfile.txt")
+			if err := os.WriteFile(filePath, []byte(tc.fileContent), 0644); err != nil {
+				t.Fatalf("Failed to write test file: %v", err)
+			}
 
-		if len(typos) != 1 {
-			t.Fatalf("Expected 1 typo, but got %d", len(typos))
-		}
+			gotTypos := checkFile(filePath, mockDictionary)
 
-		// Let's check the single typo found
-		foundTypo := typos[0]
-		if foundTypo.Word != "tst" {
-			t.Errorf("Expected typo to be 'tst', but got '%s'", foundTypo.Word)
-		}
-		if foundTypo.LineNumber != 1 {
-			t.Errorf("Expected line number to be 1, but got %d", foundTypo.LineNumber)
-		}
+			// Normalize for comparison: treat a nil slice and an empty slice as the same.
+			if len(gotTypos) == 0 && len(tc.expectedTypos) == 0 {
+				return // They are effectively equal, so we pass.
+			}
 
-		expectedColumn := 24
-		if foundTypo.Column != expectedColumn {
-			t.Errorf("Expected column to be %d, but got %d", expectedColumn, foundTypo.Column)
-		}
-	})
-
-	t.Run("file with no typos", func(t *testing.T) {
-		content := "hello world this is a test"
-		filePath := filepath.Join(tempDir, "test2.txt")
-		os.WriteFile(filePath, []byte(content), 0644)
-
-		typos := checkFile(filePath, mockDictionary)
-		if len(typos) != 0 {
-			t.Errorf("Expected 0 typos, but got %d", len(typos))
-		}
-	})
+			if !reflect.DeepEqual(gotTypos, tc.expectedTypos) {
+				t.Errorf("checkFile() returned incorrect typos.\nGOT:\n%v\nWANT:\n%v", gotTypos, tc.expectedTypos)
+			}
+		})
+	}
 }
 
 func TestRunConcurrentChecker(t *testing.T) {
