@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,7 +13,7 @@ import (
 	"sync"
 )
 
-var wordRegex = regexp.MustCompile(`\w+`)
+var wordRegex = regexp.MustCompile(`[a-zA-Z']+`)
 
 type MisspelledWord struct {
 	Word       string
@@ -25,7 +26,6 @@ type CheckResult struct {
 	Typos    []MisspelledWord
 }
 
-// --- IMPROVEMENT: Function signature now accepts a verbose flag ---
 func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
 	jobs := make(chan string, 100)
 	results := make(chan CheckResult, 100)
@@ -46,7 +46,12 @@ func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, exclu
 			}
 
 			if info.IsDir() {
-				exclude, _ := shouldExclude(path, excludePatterns)
+				exclude, err := shouldExclude(path, excludePatterns)
+				if err != nil {
+					// Log the error and continue, assuming the directory is not excluded
+					fmt.Fprintf(os.Stderr, "Error checking exclude pattern on directory %q: %v\n", path, err)
+					return nil
+				}
 				if exclude {
 					// --- IMPROVEMENT: Conditionally print skipped directory ---
 					if verbose {
@@ -63,7 +68,6 @@ func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, exclu
 				return nil
 			}
 			if exclude {
-				// --- IMPROVEMENT: Conditionally print skipped file ---
 				if verbose {
 					fmt.Printf("Skipping excluded file: %s\n", path)
 				}
@@ -76,7 +80,6 @@ func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, exclu
 				return nil
 			}
 			if isBinary {
-				// --- IMPROVEMENT: Conditionally print skipped binary file ---
 				if verbose {
 					fmt.Printf("Skipping binary file: %s\n", path)
 				}
@@ -167,6 +170,9 @@ func isLikelyBinary(filePath string) (bool, error) {
 	defer file.Close()
 	buffer := make([]byte, 512)
 	n, _ := file.Read(buffer)
+	if err != io.EOF {
+		return false, err
+	}
 	buffer = buffer[:n]
 	if bytes.Contains(buffer, []byte{0}) {
 		return true, nil
