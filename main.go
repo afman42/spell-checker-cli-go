@@ -14,6 +14,7 @@ func main() {
 	excludeStr := flag.String("exclude", "", "Optional: comma-separated list of file patterns to exclude.")
 	outputPath := flag.String("output", "", "Optional: path to an output file.")
 	outputFormat := flag.String("format", "", "Optional: output format (txt, html). Overrides filename extension.")
+	verbose := flag.Bool("verbose", false, "Enable verbose logging to show skipped files and directories.")
 	flag.Parse()
 
 	var excludePatterns []string
@@ -34,7 +35,8 @@ func main() {
 	}
 
 	path := flag.Arg(0)
-	allTypos, err := runConcurrentChecker(path, dictionary, excludePatterns)
+	// --- IMPROVEMENT: Pass verbose flag to the checker ---
+	allTypos, err := runConcurrentChecker(path, dictionary, excludePatterns, *verbose)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error processing path: %v\n", err)
 		os.Exit(1)
