@@ -18,12 +18,19 @@ Usage of ./spellchecker:
   -format string
     	Optional: output format (txt, html). Overrides filename extension.
   -output string
-    	Optional: path to an output file.
+    	Optional: path to an output file or directory (for HTML reports).
+  -personal-dict string
+    	Optional: path to a personal dictionary file (one word per line).
+  -verbose
+    	Enable verbose logging to show skipped files and directories.
 ```
 
 ```bash
+# Run it on the directory, excluding .log and .tmp files and add custom dictionary
+./spellchecker -dict "my_dict.csv" -exclude "*.log,*.tmp" -output my_arcive.txt -verbose ./my_project
+
 # Run it on the directory, excluding .log and .tmp files
-./spellchecker -dict "my_dict.csv" -exclude "*.log,*.tmp" -output my_archive.html ./my_project
+./spellchecker -dict "my_dict.csv" -exclude "*.log,*.tmp" -output ./report-html/ -format html ./my_project
 
 # Run it on the directory, excluding .log and .tmp files
 ./spellchecker -exclude "*.log,*.tmp" ./my_project
@@ -31,8 +38,14 @@ Usage of ./spellchecker:
 # This correctly generates a TEXT report, ignoring "html" in the name
 ./spellchecker -output my-html-notes.txt my_document.txt
 
-# This correctly generates an HTML report
-./spellchecker -output my_archive.html my_document.txt
+# Run check verbose file
+./spellchecker -verbose my_document.txt
+
+# Run it on the directory, and add file personal dictionary
+./spellchecker -personal-dict ./personal-dict.txt -verbose my_document.txt
+
+# Run it on the directory, and add file personal dictionary, custom file dictionary without file emmbed data
+./spellchecker -dict "my_dict.csv" -personal-dict ./personal-dict.txt -verbose my_document.txt
 ```
 
 example file `my_dict.csv` :
@@ -44,3 +57,21 @@ A,,"The name of the sixth tone in the model major scale (that in C), or the firs
 ```
 
 for testing in folder `test`
+
+The new regular expression `[a-zA-Z']+(?:-[a-zA-Z']+)*` is more sophisticated:
+
+- `[a-zA-Z']+`: This is the first part, which matches a standard word or contraction (e.g., "state").
+- `(?: ... )*`: This is the second part. The \* means it will match the pattern inside the parentheses zero or more times. This allows it to correctly identify non-hyphenated words too. The ?: makes it a non-capturing group for efficiency.
+- `-[a-zA-Z']+`: This is the pattern inside the group. It looks for a hyphen followed by another word segment (e.g., "-of", "-the", "-art").
+  Together, this regex perfectly matches "state-of-the-art", "don't", and "word" as single, complete tokens.
+
+for example `personal-dict.txt`:
+
+```
+Qopper
+FluxCapacitor
+# This is a comment
+bigcorp-api
+Gregor
+Samsa
+```

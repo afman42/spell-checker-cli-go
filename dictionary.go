@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	_ "embed"
 	"encoding/csv"
@@ -49,4 +50,29 @@ func parseDictionary(reader io.Reader) (map[string]struct{}, error) {
 		}
 	}
 	return dictionary, nil
+}
+
+func loadPersonalDictionary(path string, dictionary map[string]struct{}) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("could not open personal dictionary: %w", err)
+	}
+	defer file.Close()
+
+	count := 0
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		word := strings.TrimSpace(scanner.Text())
+		// Ignore empty lines or comments
+		if word != "" && !strings.HasPrefix(word, "#") {
+			dictionary[strings.ToLower(word)] = struct{}{}
+			count++
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("error reading personal dictionary: %w", err)
+	}
+
+	return count, nil
 }
