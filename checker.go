@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-var wordRegex = regexp.MustCompile(`[a-zA-Z']+`)
+var wordRegex = regexp.MustCompile(`[a-zA-Z']+(?:-[a-zA-Z']+)*`)
 
 type MisspelledWord struct {
 	Word        string
