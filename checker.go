@@ -16,9 +16,10 @@ import (
 var wordRegex = regexp.MustCompile(`[a-zA-Z']+`)
 
 type MisspelledWord struct {
-	Word       string
-	LineNumber int
-	Column     int
+	Word        string
+	LineNumber  int
+	Column      int
+	Suggestions []string
 }
 
 type CheckResult struct {
@@ -132,10 +133,13 @@ func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord
 			start := indices[0]
 			word := line[indices[0]:indices[1]]
 			if !isWordCorrect(word, dictionary) {
+				// When a typo is found, generate suggestions.
+				suggestions := generateSuggestions(word, dictionary)
 				misspelledWords = append(misspelledWords, MisspelledWord{
-					Word:       word,
-					LineNumber: lineNumber,
-					Column:     start + 1,
+					Word:        word,
+					LineNumber:  lineNumber,
+					Column:      start + 1,
+					Suggestions: suggestions,
 				})
 			}
 		}
