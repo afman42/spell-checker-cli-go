@@ -10,6 +10,7 @@ import (
 
 func main() {
 	dictPath := flag.String("dict", "", "Optional: path to a custom CSV dictionary file.")
+	personalDictPath := flag.String("personal-dict", "", "Optional: path to a personal dictionary file (one word per line).")
 	excludeStr := flag.String("exclude", "", "Optional: comma-separated list of file patterns to exclude.")
 	outputPath := flag.String("output", "", "Optional: path to an output file or directory (for HTML reports).")
 	outputFormat := flag.String("format", "", "Optional: output format (txt, html). Overrides filename extension.")
@@ -27,6 +28,15 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("Successfully loaded %d words.\n", len(dictionary))
+
+	if *personalDictPath != "" {
+		count, err := loadPersonalDictionary(*personalDictPath, dictionary)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading personal dictionary: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Successfully loaded and merged %d words from personal dictionary.\n", count)
+	}
 
 	if flag.NArg() < 1 {
 		fmt.Println("Usage: spellchecker [flags] <file_or_directory>")

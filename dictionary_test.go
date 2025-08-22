@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,6 @@ Golang,"a programming language"`
 
 		reader := strings.NewReader(csvData)
 		dict, err := parseDictionary(reader)
-
 		if err != nil {
 			t.Fatalf("Expected no error, but got %v", err)
 		}
@@ -43,4 +43,52 @@ Golang,"a programming language"`
 			t.Fatal("Expected an error for empty input, but got nil")
 		}
 	})
+}
+
+func TestLoadPersonalDictionary(t *testing.T) {
+	// 1. Create a pre-existing dictionary.
+	existingDict := map[string]struct{}{
+		"hello": {},
+		"world": {},
+	}
+
+	// 2. Create a temporary personal dictionary file.
+	content := `
+	  Qopper
+	FluxCapacitor
+	# This is a comment
+	bigcorp-api
+
+	` // Includes whitespace, comments, and empty lines to test robustness.
+	tmpFile, err := os.CreateTemp("", "personal-dict-*.txt")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.WriteString(content); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	tmpFile.Close()
+
+	// 3. Run the function to load and merge the words.
+	count, err := loadPersonalDictionary(tmpFile.Name(), existingDict)
+	if err != nil {
+		t.Fatalf("loadPersonalDictionary failed: %v", err)
+	}
+
+	// 4. Assertions.
+	if count != 3 {
+		t.Errorf("Expected to load 3 words, but got %d", count)
+	}
+
+	expectedWords := []string{"hello", "world", "qopper", "fluxcapacitor", "bigcorp-api"}
+	if len(existingDict) != len(expectedWords) {
+		t.Errorf("Expected final dictionary size to be %d, but got %d", len(expectedWords), len(existingDict))
+	}
+
+	for _, word := range expectedWords {
+		if _, ok := existingDict[word]; !ok {
+			t.Errorf("Expected dictionary to contain '%s', but it did not", word)
+		}
+	}
 }
