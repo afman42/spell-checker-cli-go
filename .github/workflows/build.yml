@@ -56,7 +56,7 @@ jobs:
 
       - name: Testing App CLI And Multi-File HTML Reports
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker -output "./tmp/multi-file-html-reports/" ./test/
+        run: ./bin/linux_amd64/tmp/spellchecker -format html -output "./tmp/multi-file-html-reports/" ./test/
 
       - name: Upload Folder Temporary
         uses: actions/upload-artifact@v4
