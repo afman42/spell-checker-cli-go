@@ -37,7 +37,7 @@ jobs:
 
       - name: Testing App CLI And Scan a single file
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker -output "./tmp/scan-a-single-file.txt" ./test/kafka.text
+        run: ./bin/linux_amd64/tmp/spellchecker -output "./tmp/scan-a-single-file.txt" ./test/kafka.txt
 
       - name: Testing App CLI And Scan with exclusions and verbose output
         continue-on-error: true
@@ -47,7 +47,7 @@ jobs:
         continue-on-error: true
         run: |
           touch .project-words.txt
-          echo "Qopper\nFluxCapacitor\n# This is a comment\nbigcorp-api\nGregor\nSamsa" >> .project-words.txt
+          echo -e "Qopper\nFluxCapacitor\n# This is a comment\nbigcorp-api\nGregor\nSamsa" >> .project-words.txt
           ./bin/linux_amd64/tmp/spellchecker -personal-dict ".project-words.txt" -output "./tmp/use-a-personal-dictionary-to-allow-specific-jargon.txt" ./test/kafka.txt
 
       - name: Testing App CLI And Generate a single HTML report file (by extension)
@@ -56,7 +56,7 @@ jobs:
 
       - name: Testing App CLI And Multi-File HTML Reports
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker -output "./tmp/multi-file-html-reports/" ./test/
+        run: ./bin/linux_amd64/tmp/spellchecker -format html -output "./tmp/multi-file-html-reports/" ./test/
 
       - name: Upload Folder Temporary
         uses: actions/upload-artifact@v4
