@@ -33,30 +33,48 @@ jobs:
 
       - name: Testing App CLI And Scan a directory with default settings
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker -output "./tmp/scan-a-directory-with-default-settings.txt" ./test/
+        run: ./bin/linux_amd64/tmp/spellchecker --output "./tmp/scan-a-directory-with-default-settings.txt" ./test/
 
       - name: Testing App CLI And Scan a single file
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker -output "./tmp/scan-a-single-file.txt" ./test/kafka.txt
+        run: ./bin/linux_amd64/tmp/spellchecker --output "./tmp/scan-a-single-file.txt" ./test/kafka.txt
 
       - name: Testing App CLI And Scan with exclusions and verbose output
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker -exclude "*.pdf,*.tmp,bin/" -output "./tmp/scan-with-exclusions-and-verbose-output.txt" --verbose ./test/
+        run: ./bin/linux_amd64/tmp/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/scan-with-exclusions-and-verbose-output.txt" --verbose ./test/
 
       - name: Testing App CLI And Use a personal dictionary to allow specific jargon
         continue-on-error: true
         run: |
           touch .project-words.txt
           echo -e "Qopper\nFluxCapacitor\n# This is a comment\nbigcorp-api\nGregor\nSamsa" >> .project-words.txt
-          ./bin/linux_amd64/tmp/spellchecker -personal-dict ".project-words.txt" -output "./tmp/use-a-personal-dictionary-to-allow-specific-jargon.txt" ./test/kafka.txt
+          ./bin/linux_amd64/tmp/spellchecker --personal-dict ".project-words.txt" --output "./tmp/use-a-personal-dictionary-to-allow-specific-jargon.txt" ./test/kafka.txt
 
       - name: Testing App CLI And Generate a single HTML report file (by extension)
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker -exclude "*.pdf,*.tmp,bin/" -output "./tmp/generate-a-single-HTML-report-file.html" ./test/
+        run: ./bin/linux_amd64/tmp/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/generate-a-single-HTML-report-file.html" ./test/
 
       - name: Testing App CLI And Multi-File HTML Reports
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker -format html -output "./tmp/multi-file-html-reports/" ./test/
+        run: ./bin/linux_amd64/tmp/spellchecker --format html --output "./tmp/multi-file-html-reports/" ./test/
+
+      - name: Testing App CLI And Setup Config File YAML in the current directory and Verbose file
+        continue-on-error: true
+        run: |
+          touch spellchecker.yaml
+          echo "# A list of glob patterns to exclude from the scan.
+          exclude:
+            - \"*.log\"
+            - \"build/\"
+            - \"vendor/\"
+
+          # Path to a personal word list to add to the dictionary.
+          personal-dictionary: \".project-words.txt\"
+
+          # Default output format and path.
+          format: \"html\"
+          output: \"./spellcheck-reports/\"" >> spellchecker.yaml
+          ./bin/linux_amd64/tmp/spellchecker --verbose ./test/
 
       - name: Upload Folder Temporary
         uses: actions/upload-artifact@v4
