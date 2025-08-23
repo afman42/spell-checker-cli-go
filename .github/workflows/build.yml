@@ -22,6 +22,9 @@ jobs:
         with:
           go-version: 1.24.3
 
+      - name: Go Mod tidy
+        run: go mod tidy
+
       - name: Go Test All File
         run: go test *.go -v
 
@@ -73,7 +76,7 @@ jobs:
 
           # Default output format and path.
           format: \"html\"
-          output: \"./spellcheck-reports/\"" >> spellchecker.yaml
+          output: \"./tmp/spellcheck-reports/\"" >> spellchecker.yaml
           ./bin/linux_amd64/tmp/spellchecker --verbose ./test/
 
       - name: Upload Folder Temporary
