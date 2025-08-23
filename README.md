@@ -11,41 +11,83 @@ usage cli:
 
 ```bash
 Usage of ./spellchecker:
-  -dict string
+  --dict string
     	Optional: path to a custom CSV dictionary file.
-  -exclude string
+  --exclude string
     	Optional: comma-separated list of file patterns to exclude.
-  -format string
+  --format string
     	Optional: output format (txt, html). Overrides filename extension.
-  -output string
+  --output string
     	Optional: path to an output file or directory (for HTML reports).
-  -personal-dict string
+  --personal-dict string
     	Optional: path to a personal dictionary file (one word per line).
-  -verbose
+  --verbose
     	Enable verbose logging to show skipped files and directories.
 ```
 
 ```bash
 # Run it on the directory, excluding .log and .tmp files and add custom dictionary
-./spellchecker -dict "my_dict.csv" -exclude "*.log,*.tmp" -output my_arcive.txt -verbose ./my_project
+./spellchecker --dict "my_dict.csv" --exclude "*.log,*.tmp" --output my_arcive.txt --verbose ./my_project
 
 # Run it on the directory, excluding .log and .tmp files
-./spellchecker -dict "my_dict.csv" -exclude "*.log,*.tmp" -output ./report-html/ -format html ./my_project
+./spellchecker --dict "my_dict.csv" --exclude "*.log,*.tmp" --output ./report-html/ --format html ./my_project
 
 # Run it on the directory, excluding .log and .tmp files
-./spellchecker -exclude "*.log,*.tmp" ./my_project
+./spellchecker --exclude "*.log,*.tmp" ./my_project
 
 # This correctly generates a TEXT report, ignoring "html" in the name
-./spellchecker -output my-html-notes.txt my_document.txt
+./spellchecker --output my-html-notes.txt my_document.txt
 
 # Run check verbose file
-./spellchecker -verbose my_document.txt
+./spellchecker --verbose my_document.txt
 
 # Run it on the directory, and add file personal dictionary
-./spellchecker -personal-dict ./personal-dict.txt -verbose my_document.txt
+./spellchecker --personal-dict ./personal-dict.txt --verbose my_document.txt
 
 # Run it on the directory, and add file personal dictionary, custom file dictionary without file emmbed data
-./spellchecker -dict "my_dict.csv" -personal-dict ./personal-dict.txt -verbose my_document.txt
+./spellchecker --dict "my_dict.csv" --personal-dict ./personal-dict.txt --verbose my_document.txt
+```
+
+another option, add configuration file:
+
+- `spellchecker.yaml`
+
+```yaml
+# A list of glob patterns to exclude from the scan.
+exclude:
+  - "*.log"
+  - "build/"
+  - "vendor/"
+
+# Path to a personal word list to add to the dictionary.
+personal-dictionary: ".project-words.txt"
+
+# Default output format and path.
+format: "html"
+output: "./spellcheck-reports/"
+```
+
+- or another option file `spellchecker.json`
+
+```json
+{
+  "exclude": ["*.log", "build/", "vendor/"],
+  "personal-dictionary": ".project-words.txt",
+  "format": "html",
+  "output": "./spellcheck-reports/"
+}
+```
+
+```bash
+# Run it on the directory, and add file configuration custom, flag verbose
+./spellchecker --verbose <directory>
+
+# Run it on the directory, and add file configuration custom
+./spellchecker <directory>
+
+# This will generate a text report to the terminal, overriding the
+# "output" and "format" settings in the config file for this one run.
+./spell-checker-cli --output "" <directory>
 ```
 
 example file `my_dict.csv` :

@@ -3,3 +3,5 @@ spell-checker-cli
 *.html
 *.txt
 bin/
+*.yaml
+*.json
