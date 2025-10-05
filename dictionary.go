@@ -15,19 +15,18 @@ import (
 var dictionaryData []byte
 
 func loadDictionary(customPath string) (map[string]struct{}, error) {
-	var reader io.Reader
 	if customPath != "" {
 		fmt.Printf("Loading custom dictionary from: %s\n", customPath)
 		file, err := os.Open(customPath)
 		if err != nil {
 			return nil, fmt.Errorf("could not open custom dictionary: %w", err)
 		}
-		reader = file
-	} else {
-		fmt.Println("Loading dictionary from embedded data.")
-		reader = bytes.NewReader(dictionaryData)
+		defer file.Close()
+		return parseDictionary(file)
 	}
-	return parseDictionary(reader)
+
+	fmt.Println("Loading dictionary from embedded data.")
+	return parseDictionary(bytes.NewReader(dictionaryData))
 }
 
 func parseDictionary(reader io.Reader) (map[string]struct{}, error) {
