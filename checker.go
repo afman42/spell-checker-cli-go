@@ -25,12 +25,14 @@ type MisspelledWord struct {
 type CheckResult struct {
 	FilePath string
 	Typos    []MisspelledWord
+	Err      error
 }
 
 func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
 	jobs := make(chan string, 100)
 	results := make(chan CheckResult, 100)
 	var wg sync.WaitGroup
+	walkErrCh := make(chan error, 1)
 
 	numWorkers := runtime.NumCPU()
 	for i := 0; i < numWorkers; i++ {
@@ -40,7 +42,7 @@ func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, exclu
 
 	go func() {
 		defer close(jobs)
-		filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		walkErrCh <- filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error accessing path %q: %v\n", path, err)
 				return err
@@ -89,6 +91,7 @@ func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, exclu
 			jobs <- path
 			return nil
 		})
+		close(walkErrCh)
 	}()
 
 	go func() {
@@ -97,28 +100,42 @@ func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, exclu
 	}()
 
 	allTypos := make(map[string][]MisspelledWord)
+	var workerErr error
 	for result := range results {
+		if result.Err != nil && workerErr == nil {
+			workerErr = result.Err
+		}
 		if len(result.Typos) > 0 {
 			allTypos[result.FilePath] = result.Typos
 		}
 	}
 
+	var walkErr error
+	if err, ok := <-walkErrCh; ok {
+		walkErr = err
+	}
+
+	if workerErr != nil {
+		return nil, workerErr
+	}
+	if walkErr != nil {
+		return nil, walkErr
+	}
+
 	return allTypos, nil
 }
-
-// worker and other functions remain unchanged.
 func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary map[string]struct{}) {
 	defer wg.Done()
 	for path := range jobs {
-		typos := checkFile(path, dictionary)
-		results <- CheckResult{FilePath: path, Typos: typos}
+		typos, err := checkFile(path, dictionary)
+		results <- CheckResult{FilePath: path, Typos: typos, Err: err}
 	}
 }
 
-func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord {
+func checkFile(filePath string, dictionary map[string]struct{}) ([]MisspelledWord, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("could not open %s: %w", filePath, err)
 	}
 	defer file.Close()
 
@@ -133,7 +150,6 @@ func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord
 			start := indices[0]
 			word := line[indices[0]:indices[1]]
 			if !isWordCorrect(word, dictionary) {
-				// When a typo is found, generate suggestions.
 				suggestions := generateSuggestions(word, dictionary)
 				misspelledWords = append(misspelledWords, MisspelledWord{
 					Word:        word,
@@ -144,7 +160,12 @@ func checkFile(filePath string, dictionary map[string]struct{}) []MisspelledWord
 			}
 		}
 	}
-	return misspelledWords
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed scanning %s: %w", filePath, err)
+	}
+
+	return misspelledWords, nil
 }
 
 func isWordCorrect(word string, dictionary map[string]struct{}) bool {
@@ -173,8 +194,8 @@ func isLikelyBinary(filePath string) (bool, error) {
 	}
 	defer file.Close()
 	buffer := make([]byte, 512)
-	n, _ := file.Read(buffer)
-	if err != io.EOF {
+	n, err := file.Read(buffer)
+	if err != nil && err != io.EOF {
 		return false, err
 	}
 	buffer = buffer[:n]

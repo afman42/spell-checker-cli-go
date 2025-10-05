@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -88,7 +91,10 @@ func TestCheckFile(t *testing.T) {
 				t.Fatalf("Failed to write test file: %v", err)
 			}
 
-			gotTypos := checkFile(filePath, mockDictionary)
+			gotTypos, err := checkFile(filePath, mockDictionary)
+			if err != nil {
+				t.Fatalf("checkFile returned error: %v", err)
+			}
 
 			// Normalize for comparison: treat a nil slice and an empty slice as the same.
 			if len(gotTypos) == 0 && len(tc.expectedTypos) == 0 {
@@ -168,5 +174,61 @@ func TestRunConcurrentChecker(t *testing.T) {
 		}
 	} else {
 		t.Errorf("Expected to find results for %s, but did not", filePath)
+	}
+}
+
+func TestRunConcurrentCheckerWorkerError(t *testing.T) {
+	mockDictionary := map[string]struct{}{"word": {}}
+	tempDir := t.TempDir()
+
+	longToken := strings.Repeat("a", bufio.MaxScanTokenSize+10)
+	if err := os.WriteFile(filepath.Join(tempDir, "long.txt"), []byte(longToken), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	result, err := runConcurrentChecker(tempDir, mockDictionary, nil, false)
+	if err == nil {
+		t.Fatal("expected error from runConcurrentChecker, got nil")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("expected ErrTooLong, got %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected nil result, got %v", result)
+	}
+}
+
+func TestRunConcurrentCheckerWalkError(t *testing.T) {
+	mockDictionary := map[string]struct{}{"word": {}}
+	missingPath := filepath.Join(t.TempDir(), "does-not-exist")
+
+	if _, err := runConcurrentChecker(missingPath, mockDictionary, nil, false); err == nil {
+		t.Fatal("expected error from runConcurrentChecker when root missing")
+	}
+}
+
+func TestCheckFileScannerError(t *testing.T) {
+	mockDictionary := map[string]struct{}{"word": {}}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "long.txt")
+
+	longToken := strings.Repeat("b", bufio.MaxScanTokenSize+10)
+	if err := os.WriteFile(filePath, []byte(longToken), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	_, err := checkFile(filePath, mockDictionary)
+	if err == nil {
+		t.Fatal("expected scanner error, got nil")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("expected ErrTooLong, got %v", err)
+	}
+}
+
+func TestIsLikelyBinaryReadError(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := isLikelyBinary(dir); err == nil {
+		t.Fatal("expected error when checking directory")
 	}
 }

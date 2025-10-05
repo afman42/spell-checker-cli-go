@@ -92,3 +92,32 @@ func TestLoadPersonalDictionary(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadDictionaryCustomFile(t *testing.T) {
+	tempFile, err := os.CreateTemp(t.TempDir(), "dict-*.csv")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	content := "word,definition\nHello,world\nFoobar,test"
+	if _, err := tempFile.WriteString(content); err != nil {
+		t.Fatalf("failed to write temp dictionary: %v", err)
+	}
+	tempFile.Close()
+
+	dict, err := loadDictionary(tempFile.Name())
+	if err != nil {
+		t.Fatalf("loadDictionary returned error: %v", err)
+	}
+
+	if len(dict) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(dict))
+	}
+	if _, ok := dict["hello"]; !ok {
+		t.Fatalf("expected 'hello' in dictionary")
+	}
+	if _, ok := dict["foobar"]; !ok {
+		t.Fatalf("expected 'foobar' in dictionary")
+	}
+}
