@@ -1,6 +1,6 @@
 module spell-checker-cli
 
-go 1.24.3
+go 1.22
 
 require (
 	github.com/spf13/pflag v1.0.7
