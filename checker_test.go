@@ -91,7 +91,8 @@ func TestCheckFile(t *testing.T) {
 				t.Fatalf("Failed to write test file: %v", err)
 			}
 
-			gotTypos, err := checkFile(filePath, mockDictionary)
+			concurrentDict := NewConcurrentDictionary(mockDictionary)
+			gotTypos, err := checkFile(filePath, concurrentDict)
 			if err != nil {
 				t.Fatalf("checkFile returned error: %v", err)
 			}
@@ -217,7 +218,8 @@ func TestCheckFileScannerError(t *testing.T) {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
-	_, err := checkFile(filePath, mockDictionary)
+	concurrentDict := NewConcurrentDictionary(mockDictionary)
+	_, err := checkFile(filePath, concurrentDict)
 	if err == nil {
 		t.Fatal("expected scanner error, got nil")
 	}
