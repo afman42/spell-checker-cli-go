@@ -96,7 +96,11 @@ jobs:
 
       - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
         run: |
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o=./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker .
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o=./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker.exe .
+          else
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o=./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker .
+          fi
         shell: bash
 
       - name: Download UPX (Linux)
@@ -105,20 +109,16 @@ jobs:
           wget https://github.com/upx/upx/releases/download/v5.0.2/upx-5.0.2-amd64_linux.tar.xz
           tar -xf upx-5.0.2-amd64_linux.tar.xz
 
-      - name: Download UPX (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          brew install upx
 
       - name: Compress Binary (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           ./upx-5.0.2-amd64_linux/upx ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker -o ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
 
-      - name: Compress Binary (macOS)
+      - name: Copy Binary (macOS - No Compression)
         if: matrix.os == 'macos-latest'
         run: |
-          upx ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker -o ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
+          mv ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
 
       - name: Copy Binary (Windows - No Compression)
         if: matrix.os == 'windows-latest'
