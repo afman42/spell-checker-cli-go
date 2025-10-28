@@ -5,15 +5,19 @@ permissions:
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
-      fail-fast: true
+      matrix:
+        go-version: [ '1.22', '1.23' ]
+      fail-fast: false
     steps:
       - name: Check out code
         uses: actions/checkout@v5
@@ -21,82 +25,48 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Verify Go version
+        run: go version
 
       - name: Go Mod tidy
-        run: go mod tidy
-
-      - name: Go Test All File
-        run: go test ./... -v
-
-      - name: Prepare build directories
         run: |
-          mkdir -p ./bin/linux_amd64/tmp
-          mkdir -p ./bin/windows_amd64/tmp
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum || (echo "Please run 'go mod tidy' and commit the changes" && exit 1)
 
-      - name: Go Build For Linux amd64
-        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o=./bin/linux_amd64/tmp/spellchecker ./*.go;
+      - name: Run Go Vet
+        run: go vet ./...
 
-      - name: Make Directory Temporary
-        run: mkdir -p ./tmp/
-
-      - name: Testing App CLI And Scan a directory with default settings
-        continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --output "./tmp/scan-a-directory-with-default-settings.txt" ./test/
-
-      - name: Testing App CLI And Scan a single file
-        continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --output "./tmp/scan-a-single-file.txt" ./test/kafka.txt
-
-      - name: Testing App CLI And Scan with exclusions and verbose output
-        continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/scan-with-exclusions-and-verbose-output.txt" --verbose ./test/
-
-      - name: Testing App CLI And Use a personal dictionary to allow specific jargon
-        continue-on-error: true
+      - name: Run Static Analysis
         run: |
-          touch .project-words.txt
-          echo -e "Qopper\nFluxCapacitor\n# This is a comment\nbigcorp-api\nGregor\nSamsa" >> .project-words.txt
-          ./bin/linux_amd64/tmp/spellchecker --personal-dict ".project-words.txt" --output "./tmp/use-a-personal-dictionary-to-allow-specific-jargon.txt" ./test/kafka.txt
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
 
-      - name: Testing App CLI And Generate a single HTML report file (by extension)
-        continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/generate-a-single-HTML-report-file.html" ./test/
+      - name: Run Tests with Coverage
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 
-      - name: Testing App CLI And Multi-File HTML Reports
-        continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --format html --output "./tmp/multi-file-html-reports/" ./test/
-
-      - name: Testing App CLI And Setup Config File YAML in the current directory and Verbose file
-        continue-on-error: true
-        run: |
-          touch spellchecker.yaml
-          echo "# A list of glob patterns to exclude from the scan.
-          exclude:
-            - \"*.log\"
-            - \"build/\"
-            - \"vendor/\"
-
-          # Path to a personal word list to add to the dictionary.
-          personal-dictionary: \".project-words.txt\"
-
-          # Default output format and path.
-          format: \"html\"
-          output: \"./tmp/spellcheck-reports/\"" >> spellchecker.yaml
-          ./bin/linux_amd64/tmp/spellchecker --verbose ./test/
-
-      - name: Upload Folder Temporary
-        uses: actions/upload-artifact@v4
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          name: testing-folder-temporary
-          path: ./tmp/
+          file: ./coverage.txt
+          fail_ci_if_error: false
+
   build:
     name: Build
-    needs: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
-      fail-fast: true
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        goos: [ linux, windows, darwin ]
+        goarch: [ amd64, arm64 ]
+        exclude:
+          # Exclude ARM64 on Windows until we verify UPX supports it
+          - os: windows-latest
+            goarch: arm64
+      fail-fast: false
     steps:
       - name: Check out code
         uses: actions/checkout@v5
@@ -105,35 +75,129 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
 
-      - name: Download UPX And Extract Folder
-        run: wget https://github.com/upx/upx/releases/download/v5.0.2/upx-5.0.2-amd64_linux.tar.xz && tar -xf upx-5.0.2-amd64_linux.tar.xz
+      - name: Verify Go version
+        run: go version
+
+      - name: Create build directories
+        run: |
+          mkdir -p ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp
+        shell: bash
+
+      - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
+        run: |
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o=./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker .
+        shell: bash
+
+      - name: Download UPX (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          wget https://github.com/upx/upx/releases/download/v5.0.2/upx-5.0.2-amd64_linux.tar.xz
+          tar -xf upx-5.0.2-amd64_linux.tar.xz
+
+      - name: Download UPX (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install upx
+
+      - name: Compress Binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          ./upx-5.0.2-amd64_linux/upx ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker -o ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
+
+      - name: Compress Binary (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          upx ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker -o ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
+
+      - name: Copy Binary (Windows - No Compression)
+        if: matrix.os == 'windows-latest'
+        run: |
+          Copy-Item -Path "./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker.exe" -Destination "./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}.exe"
+        shell: pwsh
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}*
+            ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - name: Prepare build directories
+        run: mkdir -p ./bin/linux_amd64/tmp
+
+      - name: Build for testing
+        run: GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o=./bin/linux_amd64/tmp/spellchecker .
+
+      - name: Make test directory
+        run: mkdir -p ./tmp/
+
+      - name: Test CLI - Scan directory with default settings
+        run: ./bin/linux_amd64/tmp/spellchecker --output "./tmp/scan-a-directory-with-default-settings.txt" ./test/
+
+      - name: Test CLI - Scan a single file
+        run: ./bin/linux_amd64/tmp/spellchecker --output "./tmp/scan-a-single-file.txt" ./test/index.md
+
+      - name: Test CLI - Scan with exclusions and verbose output
+        run: ./bin/linux_amd64/tmp/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/scan-with-exclusions-and-verbose-output.txt" --verbose ./test/
+
+      - name: Test CLI - Use a personal dictionary
         run: |
-          mkdir -p ./bin/linux_amd64/tmp
-          mkdir -p ./bin/windows_amd64/tmp
+          echo -e "Qopper\nFluxCapacitor\n# This is a comment\nbigcorp-api\nGregor\nSamsa" > .project-words.txt
+          ./bin/linux_amd64/tmp/spellchecker --personal-dict ".project-words.txt" --output "./tmp/use-a-personal-dictionary-to-allow-specific-jargon.txt" ./test/index.md
 
-      - name: Go Build For Linux amd64
-        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o=./bin/linux_amd64/tmp/spellchecker ./*.go;
+      - name: Test CLI - Generate single HTML report
+        run: ./bin/linux_amd64/tmp/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/generate-a-single-HTML-report-file.html" ./test/
 
-      - name: Go Build For Windows amd64
-        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s" -o=./bin/windows_amd64/tmp/spellchecker.exe ./*.go;
+      - name: Test CLI - Multi-File HTML Reports
+        run: ./bin/linux_amd64/tmp/spellchecker --format html --output "./tmp/multi-file-html-reports/" ./test/
 
-      - name: Compress Linux
-        run: ./upx-5.0.2-amd64_linux/upx ./bin/linux_amd64/tmp/spellchecker -o ./bin/linux_amd64/spellchecker-linux-amd64;
+      - name: Test CLI - Config file functionality
+        run: |
+          cat > spellchecker.yaml << 'EOF'
+          # A list of glob patterns to exclude from the scan.
+          exclude:
+            - "*.log"
+            - "build/"
+            - "vendor/"
 
-      - name: Compress Windows
-        run: ./upx-5.0.2-amd64_linux/upx ./bin/windows_amd64/tmp/spellchecker.exe -o ./bin/windows_amd64/spellchecker-windows-amd64.exe;
+          # Path to a personal word list to add to the dictionary.
+          personal-dictionary: ".project-words.txt"
 
-      - name: Upload File Spell Checker Linux amd64
+          # Default output format and path.
+          format: "html"
+          output: "./tmp/spellcheck-reports/"
+          EOF
+          ./bin/linux_amd64/tmp/spellchecker --verbose ./test/
+
+      - name: Test CLI - Stdin functionality
+        run: |
+          echo "This is a wondefrul text with some erors" | ./bin/linux_amd64/tmp/spellchecker - > ./tmp/stdin-test.txt
+          # Check that the output contains expected content
+          if ! grep -q "wondefrul" ./tmp/stdin-test.txt; then
+            echo "Stdin test failed: expected 'wondefrul' not found in output"
+            exit 1
+          fi
+
+      - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
-          name: spell-checker-linux-amd64
-          path: ./bin/linux_amd64/spellchecker-linux-amd64
-
-      - name: Upload File Spell Checker Windows amd64
-        uses: actions/upload-artifact@v4
-        with:
-          name: spell-checker-windows-amd64
-          path: ./bin/windows_amd64/spellchecker-windows-amd64.exe
+          name: integration-test-results
+          path: ./tmp/
