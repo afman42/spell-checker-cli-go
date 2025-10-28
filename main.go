@@ -10,6 +10,15 @@ import (
 	"github.com/spf13/viper"
 )
 
+// OutputFormat represents valid output formats
+type OutputFormat string
+
+const (
+	FormatText OutputFormat = "txt"
+	FormatHTML OutputFormat = "html"
+	FormatAuto OutputFormat = "" // Auto-detect from file extension
+)
+
 type Config struct {
 	// Exclude is a list of file patterns to exclude.
 	Exclude []string `mapstructure:"exclude"`
@@ -18,11 +27,19 @@ type Config struct {
 	// PersonalDictionary is the path to a personal word list.
 	PersonalDictionary string `mapstructure:"personal-dictionary"`
 	// Format is the output format (txt, html).
-	Format string `mapstructure:"format"`
+	Format OutputFormat `mapstructure:"format"`
 	// Verbose enables verbose logging.
 	Verbose bool `mapstructure:"verbose"`
 	// Output is the path for the report file or directory.
 	Output string `mapstructure:"output"`
+}
+
+// Validate ensures the configuration is valid
+func (c *Config) Validate() error {
+	if c.Format != "" && c.Format != "txt" && c.Format != "html" {
+		return fmt.Errorf("invalid format: %s, must be 'txt' or 'html'", c.Format)
+	}
+	return nil
 }
 
 // loadConfig initializes flags and loads configuration from a file and flags.
@@ -71,6 +88,11 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
 
+	// Validate the configuration
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("configuration validation error: %w", err)
+	}
+
 	return &cfg, nil
 }
 
@@ -104,10 +126,25 @@ func main() {
 	}
 
 	path := pflag.Arg(0)
-	allTypos, err := runConcurrentChecker(path, dictionary, cfg.Exclude, cfg.Verbose)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error processing path: %v\n", err)
-		os.Exit(1)
+	
+	var allTypos map[string][]MisspelledWord
+	if path == "-" {
+		// Process stdin
+		concurrentDict := NewConcurrentDictionary(dictionary)
+		typos, err := checkStdin(concurrentDict)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error processing stdin: %v\n", err)
+			os.Exit(1)
+		}
+		allTypos = map[string][]MisspelledWord{"<stdin>": typos}
+	} else {
+		// Process file or directory
+		var err error
+		allTypos, err = runConcurrentChecker(path, dictionary, cfg.Exclude, cfg.Verbose)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error processing path: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// --- REVISED OUTPUT LOGIC ---
@@ -116,11 +153,11 @@ func main() {
 		generateTextReport(os.Stdout, allTypos)
 	} else {
 		// An output path was provided. Determine the format and mode.
-		format := strings.ToLower(cfg.Format)
+		format := strings.ToLower(string(cfg.Format))
 		ext := strings.ToLower(filepath.Ext(cfg.Output))
 
 		// Determine if the desired format is HTML.
-		isHTML := format == "html" || (format == "" && ext == ".html")
+		isHTML := format == string(FormatHTML) || (format == string(FormatAuto) && ext == ".html")
 
 		// NEW: Determine if we should use the multi-file directory mode for HTML.
 		// This is triggered if the format is HTML AND the path does not end in ".html".
