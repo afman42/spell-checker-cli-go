@@ -59,12 +59,21 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
-        goos: [ linux, windows, darwin ]
-        goarch: [ amd64, arm64 ]
-        exclude:
-          # Exclude ARM64 on Windows until we verify UPX supports it
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - os: ubuntu-latest  
+            goos: linux
+            goarch: arm64
           - os: windows-latest
+            goos: windows
+            goarch: amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+          - os: macos-latest
+            goos: darwin
             goarch: arm64
       fail-fast: false
     steps:
