@@ -1,113 +1,111 @@
-# Spell Checker Cli
+# Spell Checker CLI
 
-for raw text, not compile or binary
+A fast and efficient command-line spell checker that helps you find typos in your text files. Works with individual files, entire directories, or piped input from other commands.
 
-usage cli:
+## Features
 
-- file:
-  `./spellchecker <file>`
-- dir:
-  `./spellchecker <directory>`
+- **Fast**: Uses concurrent processing to check multiple files simultaneously
+- **Flexible**: Works with single files, directories, or stdin input
+- **Configurable**: Supports custom dictionaries and exclusion patterns
+- **Multiple Formats**: Output in text, HTML, or multi-file HTML reports
+- **Smart Matching**: Handles contractions (don't, we're) and hyphenated words (state-of-the-art)
 
-```bash
-Usage of ./spellchecker:
-  --dict string
-    	Optional: path to a custom CSV dictionary file.
-  --exclude string
-    	Optional: comma-separated list of file patterns to exclude.
-  --format string
-    	Optional: output format (txt, html). Overrides filename extension.
-  --output string
-    	Optional: path to an output file or directory (for HTML reports).
-  --personal-dict string
-    	Optional: path to a personal dictionary file (one word per line).
-  --verbose
-    	Enable verbose logging to show skipped files and directories.
-```
+## Installation
+
+To build from source:
 
 ```bash
-# Run it on the directory, excluding .log and .tmp files and add custom dictionary
-./spellchecker --dict "my_dict.csv" --exclude "*.log,*.tmp" --output my_arcive.txt --verbose ./my_project
-
-# Run it on the directory, excluding .log and .tmp files
-./spellchecker --dict "my_dict.csv" --exclude "*.log,*.tmp" --output ./report-html/ --format html ./my_project
-
-# Run it on the directory, excluding .log and .tmp files
-./spellchecker --exclude "*.log,*.tmp" ./my_project
-
-# This correctly generates a TEXT report, ignoring "html" in the name
-./spellchecker --output my-html-notes.txt my_document.txt
-
-# Run check verbose file
-./spellchecker --verbose my_document.txt
-
-# Run it on the directory, and add file personal dictionary
-./spellchecker --personal-dict ./personal-dict.txt --verbose my_document.txt
-
-# Run it on the directory, and add file personal dictionary, custom file dictionary without file emmbed data
-./spellchecker --dict "my_dict.csv" --personal-dict ./personal-dict.txt --verbose my_document.txt
+# Clone and build the project
+go build -o spellchecker .
 ```
 
-another option, add configuration file:
+## Quick Start
 
-- `spellchecker.yaml`
+Check a single file:
+```bash
+./spellchecker my_document.txt
+```
 
+Check an entire directory:
+```bash
+./spellchecker ./my_project/
+```
+
+Check text from stdin:
+```bash
+cat my_file.txt | ./spellchecker -
+```
+
+## Basic Usage
+
+```bash
+# Check a single file
+./spellchecker <file>
+
+# Check all files in a directory
+./spellchecker <directory>
+
+# Check text piped from stdin
+cat file.txt | ./spellchecker -
+```
+
+## Command-Line Options
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--dict` | Custom CSV dictionary file | `--dict my_words.csv` |
+| `--exclude` | Files/patterns to skip | `--exclude "*.log,*.tmp"` |
+| `--format` | Output format (txt, html) | `--format html` |
+| `--output` | Where to save results | `--output report.html` |
+| `--personal-dict` | Personal words to ignore | `--personal-dict my_words.txt` |
+| `--verbose` | Show skipped files | `--verbose` |
+
+## Examples
+
+**Check a directory, excluding certain file types:**
+```bash
+./spellchecker --exclude "*.log,*.tmp" ./my_project/
+```
+
+**Generate an HTML report:**
+```bash
+./spellchecker --format html --output report.html ./my_project/
+```
+
+**Use a custom dictionary:**
+```bash
+./spellchecker --dict my_technical_terms.csv ./docs/
+```
+
+**Check files with a personal dictionary (for project-specific terms):**
+```bash
+./spellchecker --personal-dict .project-words.txt ./src/
+```
+
+## Configuration Files
+
+Instead of command-line options, you can use a configuration file:
+
+**spellchecker.yaml:**
 ```yaml
-# A list of glob patterns to exclude from the scan.
 exclude:
   - "*.log"
   - "build/"
   - "vendor/"
 
-# Path to a personal word list to add to the dictionary.
 personal-dictionary: ".project-words.txt"
-
-# Default output format and path.
 format: "html"
-output: "./spellcheck-reports/"
+output: "./reports/"
 ```
 
-- or another option file `spellchecker.json`
-
-```json
-{
-  "exclude": ["*.log", "build/", "vendor/"],
-  "personal-dictionary": ".project-words.txt",
-  "format": "html",
-  "output": "./spellcheck-reports/"
-}
-```
-
+**Usage:**
 ```bash
-# Run it on the directory, and add file configuration custom, flag verbose
-./spellchecker --verbose <directory>
-
-# Run it on the directory, and add file configuration custom
-./spellchecker <directory>
-
-# This will generate a text report to the terminal, overriding the
-# "output" and "format" settings in the config file for this one run.
-./spell-checker-cli --output "" <directory>
+./spellchecker ./my_project/  # Uses settings from spellchecker.yaml
 ```
 
-example file `my_dict.csv` :
+## Personal Dictionary Format
 
-```bash
-word,pos,def
-A,,"The first letter of the English and of many other alphabets. The capital A of the alphabets of Middle and Western Europe, as also the small letter (a), besides the forms in Italic, black letter, etc., are all descended from the old Latin A, which was borrowed from the Greek Alpha, of the same form; and this was made from the first letter (/) of the Phoenician alphabet, the equivalent of the Hebrew Aleph, and itself from the Egyptian origin. The Aleph was a consonant letter, with a guttural breath sound that was not an element of Greek articulation; and the Greeks took it to represent their vowel Alpha with the a sound, the Phoenician alphabet having no vowel symbols."
-A,,"The name of the sixth tone in the model major scale (that in C), or the first tone of the minor scale, which is named after it the scale in A minor. The second string of the violin is tuned to the A in the treble staff. -- A sharp (A/) is the name of a musical tone intermediate between A and B. -- A flat (A/) is the name of a tone intermediate between A and G."
-```
-
-for testing in folder `test`
-
-The new regular expression `[a-zA-Z']+(?:-[a-zA-Z']+)*` is more sophisticated:
-
-- `[a-zA-Z']+`: This is the first part, which matches a standard word or contraction (e.g., "state").
-- `(?: ... )*`: This is the second part. The \* means it will match the pattern inside the parentheses zero or more times. This allows it to correctly identify non-hyphenated words too. The ?: makes it a non-capturing group for efficiency.
-- `-[a-zA-Z']+`: This is the pattern inside the group. It looks for a hyphen followed by another word segment (e.g., "-of", "-the", "-art").
-  Together, this regex perfectly matches "state-of-the-art", "don't", and "word" as single, complete tokens.
-
-for example `personal-dict.txt`:
+Create a file with one word per line. Comments start with `#`:
 
 ```
 Qopper
@@ -117,3 +115,30 @@ bigcorp-api
 Gregor
 Samsa
 ```
+
+## Custom Dictionary Format (CSV)
+
+For more advanced dictionaries in CSV format:
+
+```csv
+word,part_of_speech,definition
+hello,,A greeting
+world,,The earth
+```
+
+## Output
+
+The spell checker will:
+- Show typos with line numbers and column positions
+- Provide suggestions for misspelled words
+- Exit with status 1 if typos are found (useful for CI/CD pipelines)
+- Output results to terminal or specified file/directory
+
+## How It Works
+
+The spell checker uses:
+- **Concurrent processing**: Checks multiple files at once
+- **Efficient matching**: Fast word extraction and dictionary lookup
+- **BK-tree algorithm**: Quickly finds similar words for suggestions
+- **Binary detection**: Automatically skips binary files
+- **Smart regex**: Properly handles contractions and hyphens
