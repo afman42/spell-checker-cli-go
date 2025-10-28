@@ -39,7 +39,18 @@ func generateMultiFileHTMLReport(outputDir string, results map[string][]Misspell
 
 // sanitizePath converts a file path into a safe filename for a report.
 func sanitizePath(path string) string {
-	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_")
+	// Replace invalid characters for file names on various file systems
+	replacer := strings.NewReplacer(
+		"/", "_", 
+		"\\", "_", 
+		":", "_",
+		"<", "(",
+		">", ")",
+		"|", "_",
+		"?", "_",
+		"*", "_",
+		"\"", "'",
+	)
 	return replacer.Replace(path) + ".html"
 }
 
