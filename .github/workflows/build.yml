@@ -120,10 +120,11 @@ jobs:
       - name: Upload Binary
         uses: actions/upload-artifact@v4
         with:
-          name: spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}*
-            ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+          name: spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.sha }}
+          path: ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}*
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 30
 
   integration-test:
     name: Integration Test
