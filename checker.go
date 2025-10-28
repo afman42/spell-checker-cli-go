@@ -13,7 +13,34 @@ import (
 	"sync"
 )
 
-var wordRegex = regexp.MustCompile(`[a-zA-Z']+(?:-[a-zA-Z']+)*`)
+var (
+	// wordRegex is a compiled regular expression for tokenizing words
+	// It matches words, contractions, and hyphenated words like "state-of-the-art"
+	wordRegex = regexp.MustCompile(`[a-zA-Z']+(?:-[a-zA-Z']+)*`)
+)
+
+// ConcurrentDictionary provides thread-safe access to the dictionary
+type ConcurrentDictionary struct {
+	dict map[string]struct{}
+}
+
+// NewConcurrentDictionary creates a new thread-safe dictionary
+func NewConcurrentDictionary(dict map[string]struct{}) *ConcurrentDictionary {
+	return &ConcurrentDictionary{
+		dict: dict,
+	}
+}
+
+// Contains checks if a word exists in the dictionary
+func (cd *ConcurrentDictionary) Contains(word string) bool {
+	_, exists := cd.dict[strings.ToLower(word)]
+	return exists
+}
+
+// GetDict returns the underlying dictionary map (for suggestions)
+func (cd *ConcurrentDictionary) GetDict() map[string]struct{} {
+	return cd.dict
+}
 
 type MisspelledWord struct {
 	Word        string
@@ -34,10 +61,13 @@ func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, exclu
 	var wg sync.WaitGroup
 	walkErrCh := make(chan error, 1)
 
+	// Create a concurrent dictionary for thread-safe access
+	concurrentDict := NewConcurrentDictionary(dictionary)
+
 	numWorkers := runtime.NumCPU()
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker(&wg, jobs, results, dictionary)
+		go worker(&wg, jobs, results, concurrentDict)
 	}
 
 	go func() {
@@ -124,7 +154,7 @@ func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, exclu
 
 	return allTypos, nil
 }
-func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary map[string]struct{}) {
+func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary) {
 	defer wg.Done()
 	for path := range jobs {
 		typos, err := checkFile(path, dictionary)
@@ -132,7 +162,7 @@ func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, 
 	}
 }
 
-func checkFile(filePath string, dictionary map[string]struct{}) ([]MisspelledWord, error) {
+func checkFile(filePath string, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("could not open %s: %w", filePath, err)
@@ -150,7 +180,7 @@ func checkFile(filePath string, dictionary map[string]struct{}) ([]MisspelledWor
 			start := indices[0]
 			word := line[indices[0]:indices[1]]
 			if !isWordCorrect(word, dictionary) {
-				suggestions := generateSuggestions(word, dictionary)
+				suggestions := generateSuggestions(word, dictionary.GetDict())
 				misspelledWords = append(misspelledWords, MisspelledWord{
 					Word:        word,
 					LineNumber:  lineNumber,
@@ -168,9 +198,8 @@ func checkFile(filePath string, dictionary map[string]struct{}) ([]MisspelledWor
 	return misspelledWords, nil
 }
 
-func isWordCorrect(word string, dictionary map[string]struct{}) bool {
-	_, exists := dictionary[strings.ToLower(word)]
-	return exists
+func isWordCorrect(word string, dictionary *ConcurrentDictionary) bool {
+	return dictionary.Contains(word)
 }
 
 func shouldExclude(filePath string, patterns []string) (bool, error) {
@@ -203,4 +232,36 @@ func isLikelyBinary(filePath string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// checkStdin processes text input from stdin
+func checkStdin(dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
+	scanner := bufio.NewScanner(os.Stdin)
+	lineNumber := 0
+	var misspelledWords []MisspelledWord
+
+	for scanner.Scan() {
+		lineNumber++
+		line := scanner.Text()
+		allMatchesIndices := wordRegex.FindAllStringIndex(line, -1)
+		for _, indices := range allMatchesIndices {
+			start := indices[0]
+			word := line[indices[0]:indices[1]]
+			if !isWordCorrect(word, dictionary) {
+				suggestions := generateSuggestions(word, dictionary.GetDict())
+				misspelledWords = append(misspelledWords, MisspelledWord{
+					Word:        word,
+					LineNumber:  lineNumber,
+					Column:      start + 1,
+					Suggestions: suggestions,
+				})
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading stdin: %w", err)
+	}
+
+	return misspelledWords, nil
 }
