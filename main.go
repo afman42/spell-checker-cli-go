@@ -32,6 +32,8 @@ type Config struct {
 	Verbose bool `mapstructure:"verbose"`
 	// Output is the path for the report file or directory.
 	Output string `mapstructure:"output"`
+	// Watch enables file watching mode.
+	Watch bool `mapstructure:"watch"`
 }
 
 // Validate ensures the configuration is valid
@@ -53,6 +55,7 @@ func loadConfig() (*Config, error) {
 	pflag.String("output", "", "Optional: path to an output file or directory (for HTML reports).")
 	pflag.String("format", "", "Optional: output format (txt, html). Overrides filename extension.")
 	pflag.Bool("verbose", false, "Enable verbose logging to show skipped files and directories.")
+	pflag.Bool("watch", false, "Watch directory for changes and re-check files on save.")
 	pflag.Parse()
 
 	// --- Initialize Viper ---
@@ -60,9 +63,10 @@ func loadConfig() (*Config, error) {
 	// Set the name of the config file (without extension).
 	v.SetConfigName("spellchecker")
 	// Add search paths for the config file.
-	v.AddConfigPath(".")                          // Look in the current directory.
-	v.AddConfigPath("$HOME/.config/spellchecker") // Look in a standard config location.
-	v.AddConfigPath(`C:\Users\%USERNAME%`)        // Look in a standard config location.
+	v.AddConfigPath(".") // Look in the current directory.
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		v.AddConfigPath(filepath.Join(homeDir, ".config", "spellchecker"))
+	}
 
 	// --- Bind pflags to Viper ---
 	// This tells Viper to check the flag value if a key is not found in the config file.
@@ -72,6 +76,7 @@ func loadConfig() (*Config, error) {
 	v.BindPFlag("output", pflag.Lookup("output"))
 	v.BindPFlag("format", pflag.Lookup("format"))
 	v.BindPFlag("verbose", pflag.Lookup("verbose"))
+	v.BindPFlag("watch", pflag.Lookup("watch"))
 
 	// --- Read Config File ---
 	// Find and read the config file.
@@ -126,7 +131,29 @@ func main() {
 	}
 
 	path := pflag.Arg(0)
-	
+
+	// Watch mode: stay running and re-check files on change
+	if cfg.Watch {
+		if path == "-" {
+			fmt.Fprintln(os.Stderr, "Watch mode does not support stdin.")
+			os.Exit(1)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Cannot access path: %v\n", err)
+			os.Exit(1)
+		}
+		if !info.IsDir() {
+			fmt.Fprintln(os.Stderr, "Watch mode requires a directory path.")
+			os.Exit(1)
+		}
+		if err := runWatcher(path, dictionary, cfg.Exclude); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	var allTypos map[string][]MisspelledWord
 	if path == "-" {
 		// Process stdin
@@ -176,7 +203,6 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
 				os.Exit(1)
 			}
-			defer file.Close()
 
 			fmt.Printf("Report will be saved to: %s\n", cfg.Output)
 			if isHTML {
@@ -184,6 +210,7 @@ func main() {
 			} else {
 				generateTextReport(file, allTypos)
 			}
+			file.Close()
 		}
 	}
 
