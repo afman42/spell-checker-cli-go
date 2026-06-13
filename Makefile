@@ -2,7 +2,7 @@
 #
 # Targets:
 #   build         Optimized release build (stripped, static)
-#   build-fast    Quick development build (no stripping)
+#   build-cross   Cross-compile with GOOS/GOARCH/OUTDIR
 #   release       build + UPX compression
 #   install       Build and install to $GOPATH/bin
 #   test          Run all tests
@@ -51,10 +51,6 @@ $(BINARY): *.go dictionary.txt.zst
 build-cross: dictionary.txt.zst
 	@mkdir -p $(or $(OUTDIR),./bin)/$(GOOS)_$(GOARCH)
 	$(BUILD_ENV) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(LDFLAGS) $(TAGS) -trimpath -buildvcs=false -o $(or $(OUTDIR),./bin)/$(GOOS)_$(GOARCH)/$(BINARY) .
-
-.PHONY: build-fast
-build-fast:
-	go build -o $(BINARY) .
 
 .PHONY: release
 release: build

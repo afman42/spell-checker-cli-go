@@ -96,16 +96,20 @@ jobs:
       - name: Install UPX (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq upx-ucl
+          UPX_VERSION="5.2.0"
+          wget -q "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          tar -xf "upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          mv "upx-${UPX_VERSION}-amd64_linux/upx" ./upx
+          rm -rf "upx-${UPX_VERSION}-amd64_linux" "upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          chmod +x ./upx
 
       - name: Compress binary with UPX (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          upx --best ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker \
+          ./upx --best ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker \
             -o ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
 
-      - name: Create release artifact name (non-Linux)
+      - name: Name release artifact (non-Linux)
         if: matrix.os != 'ubuntu-latest'
         run: |
           mv ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker \
