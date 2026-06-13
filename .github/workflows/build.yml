@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        go-version: ["1.22", "1.23"]
+        go-version: ["1.24"]
       fail-fast: false
     steps:
       - name: Check out code
@@ -31,20 +31,21 @@ jobs:
       - name: Verify Go version
         run: go version
 
-      - name: Go Mod tidy
+      - name: Check go.mod is tidy
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum || (echo "Please run 'go mod tidy' and commit the changes" && exit 1)
 
-      - name: Run Go Vet
-        run: go vet ./...
+      - name: Check formatting
+        run: make fmt-check
 
-      - name: Run Static Analysis
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck ./...
+      - name: Run go vet
+        run: make vet
 
-      - name: Run Tests with Coverage
+      - name: Run staticcheck
+        run: make staticcheck
+
+      - name: Run tests with race detector and coverage
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 
       - name: Upload coverage to Codecov
@@ -54,7 +55,7 @@ jobs:
           fail_ci_if_error: false
 
   build:
-    name: Build
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -89,43 +90,36 @@ jobs:
       - name: Verify Go version
         run: go version
 
-      - name: Create build directories
-        run: |
-          mkdir -p ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp
-        shell: bash
+      - name: Cross-compile binary
+        run: make build-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} OUTDIR=./bin
 
-      - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
-        run: |
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o=./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker.exe .
-          else
-            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o=./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker .
-          fi
-        shell: bash
-
-      - name: Download UPX (Linux)
+      - name: Install UPX (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          wget https://github.com/upx/upx/releases/download/v5.0.2/upx-5.0.2-amd64_linux.tar.xz
-          tar -xf upx-5.0.2-amd64_linux.tar.xz
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl
 
-      - name: Compress Binary (Linux)
+      - name: Compress binary with UPX (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          ./upx-5.0.2-amd64_linux/upx ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker -o ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
+          upx --best ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker \
+            -o ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
 
-      - name: Copy Binary (macOS - No Compression)
-        if: matrix.os == 'macos-latest'
+      - name: Create release artifact name (non-Linux)
+        if: matrix.os != 'ubuntu-latest'
         run: |
-          mv ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
+          mv ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker \
+             ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}
+        shell: bash
 
-      - name: Copy Binary (Windows - No Compression)
+      - name: Add .exe extension (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          Copy-Item -Path "./bin/${{ matrix.goos }}_${{ matrix.goarch }}/tmp/spellchecker.exe" -Destination "./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}.exe"
-        shell: pwsh
+          mv ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }} \
+             ./bin/${{ matrix.goos }}_${{ matrix.goarch }}/spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+        shell: bash
 
-      - name: Upload Binary
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: spellchecker-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.sha }}
@@ -149,71 +143,62 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Prepare build directories
-        run: mkdir -p ./bin/linux_amd64/tmp
+      - name: Build binary for integration tests
+        run: make build-cross GOOS=linux GOARCH=amd64 OUTDIR=./bin
 
-      - name: Build for testing
-        run: GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o=./bin/linux_amd64/tmp/spellchecker .
-
-      - name: Make test directory
+      - name: Set up test directory
         run: mkdir -p ./tmp/
 
       - name: Test CLI - Scan directory with default settings
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --output "./tmp/scan-a-directory-with-default-settings.txt" ./test/
+        run: ./bin/linux_amd64/spellchecker --output "./tmp/scan-a-directory-with-default-settings.txt" ./test/
 
       - name: Test CLI - Scan a single file
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --output "./tmp/scan-a-single-file.txt" ./test/index.md
+        run: ./bin/linux_amd64/spellchecker --output "./tmp/scan-a-single-file.txt" ./test/index.md
 
       - name: Test CLI - Scan with exclusions and verbose output
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/scan-with-exclusions-and-verbose-output.txt" --verbose ./test/
+        run: ./bin/linux_amd64/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/scan-with-exclusions-and-verbose-output.txt" --verbose ./test/
 
       - name: Test CLI - Use a personal dictionary
         continue-on-error: true
         run: |
-          echo -e "Qopper\nFluxCapacitor\n# This is a comment\nbigcorp-api\nGregor\nSamsa" > .project-words.txt
-          ./bin/linux_amd64/tmp/spellchecker --personal-dict ".project-words.txt" --output "./tmp/use-a-personal-dictionary-to-allow-specific-jargon.txt" ./test/index.md
+          printf "Qopper\nFluxCapacitor\n# This is a comment\nbigcorp-api\nGregor\nSamsa\n" > .project-words.txt
+          ./bin/linux_amd64/spellchecker --personal-dict ".project-words.txt" --output "./tmp/use-a-personal-dictionary-to-allow-specific-jargon.txt" ./test/index.md
 
       - name: Test CLI - Generate single HTML report
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/generate-a-single-HTML-report-file.html" ./test/
+        run: ./bin/linux_amd64/spellchecker --exclude "*.pdf,*.tmp,bin/" --output "./tmp/generate-a-single-HTML-report-file.html" ./test/
 
-      - name: Test CLI - Multi-File HTML Reports
+      - name: Test CLI - Multi-file HTML reports
         continue-on-error: true
-        run: ./bin/linux_amd64/tmp/spellchecker --format html --output "./tmp/multi-file-html-reports/" ./test/
+        run: ./bin/linux_amd64/spellchecker --format html --output "./tmp/multi-file-html-reports/" ./test/
 
       - name: Test CLI - Config file functionality
         continue-on-error: true
         run: |
           cat > spellchecker.yaml << 'EOF'
-          # A list of glob patterns to exclude from the scan.
           exclude:
             - "*.log"
             - "build/"
             - "vendor/"
-
-          # Path to a personal word list to add to the dictionary.
           personal-dictionary: ".project-words.txt"
-
-          # Default output format and path.
           format: "html"
           output: "./tmp/spellcheck-reports/"
           EOF
-          ./bin/linux_amd64/tmp/spellchecker --verbose ./test/
+          ./bin/linux_amd64/spellchecker --verbose ./test/
 
       - name: Test CLI - Stdin functionality
         continue-on-error: true
         run: |
-          echo "This is a wondefrul text with some erors" | ./bin/linux_amd64/tmp/spellchecker - > ./tmp/stdin-test.txt
-          # Check that the output contains expected content
+          echo "This is a wondefrul text with some erors" | ./bin/linux_amd64/spellchecker - > ./tmp/stdin-test.txt
           if ! grep -q "wondefrul" ./tmp/stdin-test.txt; then
             echo "Stdin test failed: expected 'wondefrul' not found in output"
             exit 1
           fi
 
-      - name: Upload test results
+      - name: Upload integration test results
         uses: actions/upload-artifact@v4
         with:
           name: integration-test-results
