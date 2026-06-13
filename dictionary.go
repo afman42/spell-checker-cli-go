@@ -9,9 +9,14 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
-//go:embed dictionary.csv
+// dictionaryData is a zstd-compressed, newline-delimited, lowercased word list.
+// Regenerate it with `go run gen_dict.go` whenever dictionary.csv changes.
+//
+//go:embed dictionary.txt.zst
 var dictionaryData []byte
 
 func loadDictionary(customPath string) (map[string]struct{}, error) {
@@ -26,7 +31,30 @@ func loadDictionary(customPath string) (map[string]struct{}, error) {
 	}
 
 	fmt.Println("Loading dictionary from embedded data.")
-	return parseDictionary(bytes.NewReader(dictionaryData))
+	return parseEmbeddedDictionary(dictionaryData)
+}
+
+// parseEmbeddedDictionary decompresses and reads the embedded zstd-compressed
+// word list (one lowercase word per line).
+func parseEmbeddedDictionary(data []byte) (map[string]struct{}, error) {
+	zr, err := zstd.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("could not open embedded dictionary: %w", err)
+	}
+	defer zr.Close()
+
+	dictionary := make(map[string]struct{})
+	scanner := bufio.NewScanner(zr)
+	for scanner.Scan() {
+		word := strings.TrimSpace(scanner.Text())
+		if word != "" {
+			dictionary[word] = struct{}{}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading embedded dictionary: %w", err)
+	}
+	return dictionary, nil
 }
 
 func parseDictionary(reader io.Reader) (map[string]struct{}, error) {
