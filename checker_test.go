@@ -178,6 +178,188 @@ func TestRunConcurrentChecker(t *testing.T) {
 	}
 }
 
+// TestCheckFileEdgeCases covers tokenizer and column edge cases.
+func TestCheckFileEdgeCases(t *testing.T) {
+	mockDictionary := map[string]struct{}{
+		"café": {}, "hello": {}, "world": {}, "it's": {}, "a": {}, "test": {},
+	}
+
+	testCases := []struct {
+		name          string
+		fileContent   string
+		expectedTypos []MisspelledWord
+	}{
+		{
+			// "café " is 5 runes but 6 bytes (é is 2 bytes). The column for the
+			// following word must be counted in runes, not bytes.
+			name:        "rune column after multibyte char",
+			fileContent: "café xyzzy",
+			expectedTypos: []MisspelledWord{
+				{Word: "xyzzy", LineNumber: 1, Column: 6, Suggestions: []string{}},
+			},
+		},
+		{
+			name:          "surrounding quotes are stripped",
+			fileContent:   "'hello' \"world\"",
+			expectedTypos: nil,
+		},
+		{
+			name:          "pure punctuation produces no words",
+			fileContent:   "!!! ??? --- '''",
+			expectedTypos: nil,
+		},
+		{
+			name:          "valid contraction is accepted",
+			fileContent:   "it's a test",
+			expectedTypos: nil,
+		},
+		{
+			name:        "typo on second line reports correct line number",
+			fileContent: "hello world\nhello zzzz",
+			expectedTypos: []MisspelledWord{
+				{Word: "zzzz", LineNumber: 2, Column: 7, Suggestions: []string{}},
+			},
+		},
+		{
+			name:        "numbers are not treated as words",
+			fileContent: "test 12345 test",
+			// digits don't match \p{L}, so no typo is produced
+			expectedTypos: nil,
+		},
+		{
+			name:          "empty file yields no typos",
+			fileContent:   "",
+			expectedTypos: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			filePath := filepath.Join(tempDir, "testfile.txt")
+			if err := os.WriteFile(filePath, []byte(tc.fileContent), 0644); err != nil {
+				t.Fatalf("Failed to write test file: %v", err)
+			}
+
+			concurrentDict := NewConcurrentDictionary(mockDictionary)
+			gotTypos, err := checkFile(filePath, concurrentDict)
+			if err != nil {
+				t.Fatalf("checkFile returned error: %v", err)
+			}
+
+			if len(gotTypos) == 0 && len(tc.expectedTypos) == 0 {
+				return
+			}
+			if !reflect.DeepEqual(gotTypos, tc.expectedTypos) {
+				t.Errorf("checkFile() = %#v, want %#v", gotTypos, tc.expectedTypos)
+			}
+		})
+	}
+}
+
+// TestCheckFileMissing ensures opening a nonexistent file returns an error.
+func TestCheckFileMissing(t *testing.T) {
+	dict := NewConcurrentDictionary(map[string]struct{}{"word": {}})
+	if _, err := checkFile(filepath.Join(t.TempDir(), "nope.txt"), dict); err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+}
+
+// TestCollectFiles verifies filtering of excluded patterns, binary files, and dirs.
+func TestCollectFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	write := func(rel, content string) {
+		full := filepath.Join(tempDir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	write("keep.txt", "hello")
+	write("skip.log", "hello")
+	write("bin.dat", "a\x00b")
+	write("nested/keep2.md", "hello")
+	write("vendor/dep.txt", "hello")
+
+	got, err := collectFiles(tempDir, []string{"*.log", "vendor"}, false)
+	if err != nil {
+		t.Fatalf("collectFiles error: %v", err)
+	}
+
+	want := []string{
+		filepath.Join(tempDir, "keep.txt"),
+		filepath.Join(tempDir, "nested/keep2.md"),
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("collectFiles() = %v, want %v", got, want)
+	}
+}
+
+// TestCollectFilesEmptyDir verifies an empty directory yields no files and no error.
+func TestCollectFilesEmptyDir(t *testing.T) {
+	got, err := collectFiles(t.TempDir(), nil, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no files, got %v", got)
+	}
+}
+
+// TestIsLikelyBinary checks detection of binary vs text content.
+func TestIsLikelyBinary(t *testing.T) {
+	tempDir := t.TempDir()
+	cases := []struct {
+		name    string
+		content []byte
+		want    bool
+	}{
+		{"plain text", []byte("just some text"), false},
+		{"empty file", []byte{}, false},
+		{"null byte", []byte("abc\x00def"), true},
+		{"utf8 text", []byte("café déjà vu"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(tempDir, tc.name+".dat")
+			if err := os.WriteFile(p, tc.content, 0644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			got, err := isLikelyBinary(p)
+			if err != nil {
+				t.Fatalf("isLikelyBinary error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("isLikelyBinary(%q) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShouldExcludeInvalidPattern verifies a malformed glob returns an error.
+func TestShouldExcludeInvalidPattern(t *testing.T) {
+	if _, err := shouldExclude("file.txt", []string{"[invalid"}); err == nil {
+		t.Fatal("expected error for malformed pattern, got nil")
+	}
+}
+
+// TestScanForTyposCRLF ensures carriage returns don't corrupt tokenizing.
+func TestScanForTyposCRLF(t *testing.T) {
+	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
+	typos, err := scanForTypos(strings.NewReader("hello world\r\nhello world\r\n"), dict)
+	if err != nil {
+		t.Fatalf("scanForTypos error: %v", err)
+	}
+	if len(typos) != 0 {
+		t.Errorf("expected no typos, got %#v", typos)
+	}
+}
+
 func TestRunConcurrentCheckerWorkerError(t *testing.T) {
 	mockDictionary := map[string]struct{}{"word": {}}
 	tempDir := t.TempDir()

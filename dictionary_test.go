@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -119,5 +120,82 @@ func TestLoadDictionaryCustomFile(t *testing.T) {
 	}
 	if _, ok := dict["foobar"]; !ok {
 		t.Fatalf("expected 'foobar' in dictionary")
+	}
+}
+
+// TestLoadDictionaryEmbedded verifies the embedded dictionary loads and is non-trivial.
+func TestLoadDictionaryEmbedded(t *testing.T) {
+	dict, err := loadDictionary("")
+	if err != nil {
+		t.Fatalf("loadDictionary(\"\") returned error: %v", err)
+	}
+	if len(dict) < 1000 {
+		t.Errorf("expected embedded dictionary to have many words, got %d", len(dict))
+	}
+}
+
+// TestLoadDictionaryMissingFile verifies a helpful error for a nonexistent path.
+func TestLoadDictionaryMissingFile(t *testing.T) {
+	_, err := loadDictionary(filepath.Join(t.TempDir(), "does-not-exist.csv"))
+	if err == nil {
+		t.Fatal("expected error for missing dictionary file, got nil")
+	}
+}
+
+// TestParseDictionaryHeaderOnly verifies a header-only CSV yields an empty dict (no error).
+func TestParseDictionaryHeaderOnly(t *testing.T) {
+	dict, err := parseDictionary(strings.NewReader("word,definition\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(dict) != 0 {
+		t.Errorf("expected empty dictionary, got %d entries", len(dict))
+	}
+}
+
+// TestParseDictionaryDuplicateAndCase verifies case-folding and de-duplication.
+func TestParseDictionaryDuplicateAndCase(t *testing.T) {
+	dict, err := parseDictionary(strings.NewReader("word\nHello\nhello\nHELLO\nWorld"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(dict) != 2 {
+		t.Errorf("expected 2 unique words after case-folding, got %d (%v)", len(dict), dict)
+	}
+	if _, ok := dict["hello"]; !ok {
+		t.Error("expected 'hello' present")
+	}
+}
+
+// TestLoadPersonalDictionaryMissingFile verifies an error for a missing personal dict.
+func TestLoadPersonalDictionaryMissingFile(t *testing.T) {
+	dict := map[string]struct{}{}
+	if _, err := loadPersonalDictionary(filepath.Join(t.TempDir(), "nope.txt"), dict); err == nil {
+		t.Fatal("expected error for missing personal dictionary, got nil")
+	}
+}
+
+// TestLoadPersonalDictionaryCommentsOnly verifies a file of only comments/blanks
+// adds nothing and reports a zero count.
+func TestLoadPersonalDictionaryCommentsOnly(t *testing.T) {
+	tmp, err := os.CreateTemp(t.TempDir(), "personal-*.txt")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	if _, err := tmp.WriteString("# just a comment\n\n   \n# another\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tmp.Close()
+
+	dict := map[string]struct{}{"existing": {}}
+	count, err := loadPersonalDictionary(tmp.Name(), dict)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 words added, got %d", count)
+	}
+	if len(dict) != 1 {
+		t.Errorf("expected dictionary unchanged (size 1), got %d", len(dict))
 	}
 }

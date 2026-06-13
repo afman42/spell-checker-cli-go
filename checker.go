@@ -11,24 +11,36 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
+	"unicode/utf8"
 )
 
 var (
-	// wordRegex is a compiled regular expression for tokenizing words
-	// It matches words, contractions, and hyphenated words like "state-of-the-art"
-	wordRegex = regexp.MustCompile(`[a-zA-Z']+(?:-[a-zA-Z']+)*`)
+	// wordRegex tokenizes words. It matches Unicode letters, contractions
+	// (don't, it's, it’s), and hyphenated words (state-of-the-art). Leading or
+	// trailing apostrophes/quotes are not captured, and runs of only
+	// punctuation produce no match.
+	wordRegex = regexp.MustCompile(`\p{L}+(?:['’\-]\p{L}+)*`)
 )
 
-// ConcurrentDictionary provides thread-safe access to the dictionary
+// ConcurrentDictionary provides thread-safe read access to the dictionary
+// and caches a BK-tree for efficient fuzzy suggestions.
 type ConcurrentDictionary struct {
-	dict map[string]struct{}
+	dict   map[string]struct{}
+	bkTree *BKTree
 }
 
-// NewConcurrentDictionary creates a new thread-safe dictionary
+// NewConcurrentDictionary creates a new dictionary wrapper and pre-builds
+// a BK-tree for fast fuzzy matching when the dictionary is large enough.
 func NewConcurrentDictionary(dict map[string]struct{}) *ConcurrentDictionary {
-	return &ConcurrentDictionary{
+	cd := &ConcurrentDictionary{
 		dict: dict,
 	}
+	if len(dict) >= 100 {
+		cd.bkTree = NewBKTree(dict)
+	}
+	return cd
 }
 
 // Contains checks if a word exists in the dictionary
@@ -40,6 +52,18 @@ func (cd *ConcurrentDictionary) Contains(word string) bool {
 // GetDict returns the underlying dictionary map (for suggestions)
 func (cd *ConcurrentDictionary) GetDict() map[string]struct{} {
 	return cd.dict
+}
+
+// Suggest returns ranked spelling suggestions using the cached BK-tree (fast
+// path) or falls back to brute-force for small dictionaries.
+func (cd *ConcurrentDictionary) Suggest(word string) []string {
+	if len(word) > maxSuggestionWordLength {
+		return nil
+	}
+	if cd.bkTree != nil {
+		return rankSuggestions(cd.bkTree.Search(strings.ToLower(word), levenshteinThreshold))
+	}
+	return simpleGenerateSuggestions(word, cd.dict)
 }
 
 type MisspelledWord struct {
@@ -56,103 +80,181 @@ type CheckResult struct {
 }
 
 func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
-	jobs := make(chan string, 100)
-	results := make(chan CheckResult, 100)
-	var wg sync.WaitGroup
-	walkErrCh := make(chan error, 1)
+	return runConcurrentCheckerWithDict(rootPath, NewConcurrentDictionary(dictionary), excludePatterns, verbose)
+}
 
-	// Create a concurrent dictionary for thread-safe access
-	concurrentDict := NewConcurrentDictionary(dictionary)
+// runConcurrentCheckerWithDict is the core scanner using an already-built
+// ConcurrentDictionary, so the BK-tree is constructed only once per run.
+func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
+	// Phase 1: Collect all file paths (filters applied)
+	allFiles, err := collectFiles(rootPath, excludePatterns, verbose)
+	if err != nil {
+		return nil, err
+	}
+	if len(allFiles) == 0 {
+		return make(map[string][]MisspelledWord), nil
+	}
 
+	totalFiles := len(allFiles)
 	numWorkers := runtime.NumCPU()
+	jobBuf := numWorkers * 10
+	if jobBuf < 100 {
+		jobBuf = 100
+	}
+	jobs := make(chan string, jobBuf)
+	results := make(chan CheckResult, jobBuf)
+
+	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go worker(&wg, jobs, results, concurrentDict)
 	}
 
+	// Sender goroutine: pushes collected file paths to workers
 	go func() {
-		defer close(jobs)
-		walkErrCh <- filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error accessing path %q: %v\n", path, err)
-				return err
-			}
-
-			if info.IsDir() {
-				exclude, err := shouldExclude(path, excludePatterns)
-				if err != nil {
-					// Log the error and continue, assuming the directory is not excluded
-					fmt.Fprintf(os.Stderr, "Error checking exclude pattern on directory %q: %v\n", path, err)
-					return nil
-				}
-				if exclude {
-					// --- IMPROVEMENT: Conditionally print skipped directory ---
-					if verbose {
-						fmt.Printf("Skipping excluded directory: %s\n", path)
-					}
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			exclude, err := shouldExclude(path, excludePatterns)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", path, err)
-				return nil
-			}
-			if exclude {
-				if verbose {
-					fmt.Printf("Skipping excluded file: %s\n", path)
-				}
-				return nil
-			}
-
-			isBinary, err := isLikelyBinary(path)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", path, err)
-				return nil
-			}
-			if isBinary {
-				if verbose {
-					fmt.Printf("Skipping binary file: %s\n", path)
-				}
-				return nil
-			}
+		for _, path := range allFiles {
 			jobs <- path
-			return nil
-		})
-		close(walkErrCh)
+		}
+		close(jobs)
 	}()
 
+	// Sink goroutine: closes results when all workers are done
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
+	// Progress bar (stderr, terminal only)
+	showProgress := totalFiles > 1 && isStderrTerminal()
+	var processed atomic.Int64 // total results received (success + error)
+	var errored atomic.Int64   // results that had errors
+	progressDone := make(chan struct{})
+	if showProgress {
+		go renderProgressBar(totalFiles, &processed, &errored, progressDone)
+	}
+
 	allTypos := make(map[string][]MisspelledWord)
 	var workerErr error
 	for result := range results {
-		if result.Err != nil && workerErr == nil {
-			workerErr = result.Err
+		processed.Add(1)
+		if result.Err != nil {
+			errored.Add(1)
+			if workerErr == nil {
+				workerErr = result.Err
+			}
 		}
 		if len(result.Typos) > 0 {
 			allTypos[result.FilePath] = result.Typos
 		}
 	}
 
-	var walkErr error
-	if err, ok := <-walkErrCh; ok {
-		walkErr = err
+	close(progressDone)
+	if showProgress {
+		fmt.Fprint(os.Stderr, "\r"+strings.Repeat(" ", 80)+"\r")
 	}
 
 	if workerErr != nil {
 		return nil, workerErr
 	}
-	if walkErr != nil {
-		return nil, walkErr
-	}
-
 	return allTypos, nil
+}
+
+// collectFiles walks rootPath and returns a list of file paths that should be
+// checked (excludes, binary files, and directories are filtered out).
+func collectFiles(rootPath string, excludePatterns []string, verbose bool) ([]string, error) {
+	var files []string
+	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error accessing path %q: %v\n", path, err)
+			return err
+		}
+
+		if info.IsDir() {
+			exclude, err := shouldExclude(path, excludePatterns)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error checking exclude pattern on directory %q: %v\n", path, err)
+				return nil
+			}
+			if exclude {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Skipping excluded directory: %s\n", path)
+				}
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		exclude, err := shouldExclude(path, excludePatterns)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", path, err)
+			return nil
+		}
+		if exclude {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Skipping excluded file: %s\n", path)
+			}
+			return nil
+		}
+
+		isBinary, err := isLikelyBinary(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", path, err)
+			return nil
+		}
+		if isBinary {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", path)
+			}
+			return nil
+		}
+
+		files = append(files, path)
+		return nil
+	})
+	return files, err
+}
+
+// renderProgressBar prints a live progress bar to stderr until all files are done.
+func renderProgressBar(total int, processed, errored *atomic.Int64, done <-chan struct{}) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p := int(processed.Load())
+			if p >= total {
+				printProgressBar(total, total, int(errored.Load()))
+				return
+			}
+			printProgressBar(p, total, int(errored.Load()))
+		case <-done:
+			printProgressBar(total, total, int(errored.Load()))
+			return
+		}
+	}
+}
+
+func printProgressBar(current, total, errored int) {
+	const barWidth = 30
+	percent := float64(current) / float64(total) * 100
+	filled := int(float64(barWidth) * float64(current) / float64(total))
+	if filled > barWidth {
+		filled = barWidth
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	errSuffix := ""
+	if errored > 0 {
+		errSuffix = fmt.Sprintf(" (%d errored)", errored)
+	}
+	fmt.Fprintf(os.Stderr, "\r  %3.0f%% |%s| %d/%d files%s", percent, bar, current, total, errSuffix)
+}
+
+func isStderrTerminal() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary) {
 	defer wg.Done()
@@ -169,37 +271,38 @@ func checkFile(filePath string, dictionary *ConcurrentDictionary) ([]MisspelledW
 	}
 	defer file.Close()
 
+	misspelledWords, err := scanForTypos(file, dictionary)
+	if err != nil {
+		return nil, fmt.Errorf("failed scanning %s: %w", filePath, err)
+	}
+	return misspelledWords, nil
+}
+
+// scanForTypos reads a stream line by line and returns misspelled words with
+// 1-based line and (rune) column positions.
+func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
 	var misspelledWords []MisspelledWord
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(r)
 	lineNumber := 0
 	for scanner.Scan() {
 		lineNumber++
 		line := scanner.Text()
-		allMatchesIndices := wordRegex.FindAllStringIndex(line, -1)
-		for _, indices := range allMatchesIndices {
-			start := indices[0]
+		for _, indices := range wordRegex.FindAllStringIndex(line, -1) {
 			word := line[indices[0]:indices[1]]
-			if !isWordCorrect(word, dictionary) {
-				suggestions := generateSuggestions(word, dictionary.GetDict())
+			if !dictionary.Contains(word) {
 				misspelledWords = append(misspelledWords, MisspelledWord{
 					Word:        word,
 					LineNumber:  lineNumber,
-					Column:      start + 1,
-					Suggestions: suggestions,
+					Column:      utf8.RuneCountInString(line[:indices[0]]) + 1,
+					Suggestions: dictionary.Suggest(word),
 				})
 			}
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed scanning %s: %w", filePath, err)
+		return nil, err
 	}
-
 	return misspelledWords, nil
-}
-
-func isWordCorrect(word string, dictionary *ConcurrentDictionary) bool {
-	return dictionary.Contains(word)
 }
 
 func shouldExclude(filePath string, patterns []string) (bool, error) {
@@ -236,32 +339,9 @@ func isLikelyBinary(filePath string) (bool, error) {
 
 // checkStdin processes text input from stdin
 func checkStdin(dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
-	scanner := bufio.NewScanner(os.Stdin)
-	lineNumber := 0
-	var misspelledWords []MisspelledWord
-
-	for scanner.Scan() {
-		lineNumber++
-		line := scanner.Text()
-		allMatchesIndices := wordRegex.FindAllStringIndex(line, -1)
-		for _, indices := range allMatchesIndices {
-			start := indices[0]
-			word := line[indices[0]:indices[1]]
-			if !isWordCorrect(word, dictionary) {
-				suggestions := generateSuggestions(word, dictionary.GetDict())
-				misspelledWords = append(misspelledWords, MisspelledWord{
-					Word:        word,
-					LineNumber:  lineNumber,
-					Column:      start + 1,
-					Suggestions: suggestions,
-				})
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
+	misspelledWords, err := scanForTypos(os.Stdin, dictionary)
+	if err != nil {
 		return nil, fmt.Errorf("error reading stdin: %w", err)
 	}
-
 	return misspelledWords, nil
 }
