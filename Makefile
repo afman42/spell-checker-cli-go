@@ -65,6 +65,11 @@ endif
 install:
 	$(BUILD_ENV) go install $(LDFLAGS) $(TAGS) -trimpath .
 
+.PHONY: setup
+setup:
+	git config core.hooksPath .githooks
+	@echo "Pre-commit hook activated. Run 'git commit --no-verify' to skip."
+
 # -------------------------------------------------------------------
 # Dictionary
 # -------------------------------------------------------------------

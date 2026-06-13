@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# Pre-commit hook for spellchecker-cli.
+# Runs formatting check, go vet, and short tests before each commit.
+# Skip with: git commit --no-verify
+#
+
+set -e
+
+echo "--- Pre-commit checks ---"
+
+# Check Go formatting
+echo "  • fmt-check..."
+unformatted=$(go fmt ./...)
+if [ -n "$unformatted" ]; then
+    echo "FAIL: Unformatted files:"
+    echo "$unformatted"
+    exit 1
+fi
+
+# Run go vet
+echo "  • vet..."
+go vet ./...
+
+# Quick tests (skip race detector and benchmarks for speed)
+echo "  • test-short..."
+go test ./... -short -count=1
+
+echo "--- All checks passed ---"
