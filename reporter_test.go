@@ -242,6 +242,30 @@ func TestGenerateMultiFileHTMLReportCollision(t *testing.T) {
 	}
 }
 
+// TestRelLink verifies relative URL computation between report files in the
+// same directory, across subdirectories, and from the root.
+func TestRelLink(t *testing.T) {
+	cases := []struct {
+		name    string
+		current string
+		target  string
+		want    string
+	}{
+		{"same root directory", "a.html", "index.html", "index.html"},
+		{"current in subdir, target at root", "src/main.go.html", "index.html", "../index.html"},
+		{"current nested two levels", "a/b/c.html", "index.html", "../../index.html"},
+		{"both in same subdir", "src/a.html", "src/b.html", "b.html"},
+		{"current at root, target in subdir", "index.html", "src/a.html", "src/a.html"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := relLink(tc.current, tc.target); got != tc.want {
+				t.Errorf("relLink(%q, %q) = %q, want %q", tc.current, tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestGenerateMultiFileHTMLReportEmpty verifies the index reports no typos cleanly.
 func TestGenerateMultiFileHTMLReportEmpty(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")

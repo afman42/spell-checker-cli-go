@@ -253,6 +253,14 @@ git commit --no-verify
 ├── fixer.go             Auto-fix mode (--fix / --dry-run), atomic writes
 ├── watcher.go           fsnotify-based watch mode
 ├── gen_dict.go          Dictionary generator (//go:build ignore)
+├── main_test.go             Config validation edge-case tests
+├── checker_test.go          Scanner, tokenizer, and file-collection tests
+├── dictionary_test.go       Dictionary parsing/loading tests
+├── suggestions_test.go      BK-tree + Levenshtein suggestion tests
+├── reporter_test.go         Text/HTML report + relLink path tests
+├── json_report_test.go      JSON report shape and escaping tests
+├── fixer_test.go            Auto-fix and atomic-write tests
+├── watcher_test.go          Watch-mode batch and directory-watch tests
 ├── Makefile                 Build, test, lint, benchmark targets
 ├── dictionary.txt.zst       Embedded word list (zstd-compressed, 324 KB)
 ├── dictionary.csv           Source CSV for dictionary generation
