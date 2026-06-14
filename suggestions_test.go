@@ -49,6 +49,7 @@ func TestGenerateSuggestions(t *testing.T) {
 		"hello": {}, "world": {}, "error": {}, "errors": {}, "go": {}, "golang": {},
 		"state-of-the-art": {}, // Added for hyphenation test
 	}
+	cd := NewConcurrentDictionary(mockDictionary)
 
 	testCases := []struct {
 		word     string
@@ -65,11 +66,11 @@ func TestGenerateSuggestions(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.word, func(t *testing.T) {
-			got := generateSuggestions(tc.word, mockDictionary)
+			got := cd.Suggest(tc.word)
 			sort.Strings(got)
 			sort.Strings(tc.expected)
 			if !reflect.DeepEqual(got, tc.expected) {
-				t.Errorf("generateSuggestions(%q) = %v; want %v", tc.word, got, tc.expected)
+				t.Errorf("Suggest(%q) = %v; want %v", tc.word, got, tc.expected)
 			}
 		})
 	}
@@ -79,11 +80,12 @@ func TestGenerateSuggestions(t *testing.T) {
 // suggestions rather than doing expensive work.
 func TestGenerateSuggestionsLongWord(t *testing.T) {
 	dict := map[string]struct{}{"hello": {}, "world": {}}
+	cd := NewConcurrentDictionary(dict)
 	long := make([]byte, maxSuggestionWordLength+1)
 	for i := range long {
 		long[i] = 'a'
 	}
-	if got := generateSuggestions(string(long), dict); got != nil {
+	if got := cd.Suggest(string(long)); got != nil {
 		t.Errorf("expected nil for over-long word, got %v", got)
 	}
 }

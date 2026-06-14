@@ -49,11 +49,6 @@ func (cd *ConcurrentDictionary) Contains(word string) bool {
 	return exists
 }
 
-// GetDict returns the underlying dictionary map (for suggestions)
-func (cd *ConcurrentDictionary) GetDict() map[string]struct{} {
-	return cd.dict
-}
-
 // Suggest returns ranked spelling suggestions using the cached BK-tree (fast
 // path) or falls back to brute-force for small dictionaries.
 func (cd *ConcurrentDictionary) Suggest(word string) []string {

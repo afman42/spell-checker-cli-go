@@ -113,22 +113,6 @@ func rankSuggestions(scored []scoredWord) []string {
 	return out
 }
 
-// generateSuggestions finds words in the dictionary that are "close" to a misspelled word.
-// Results are ranked by edit distance and capped. Uses a BK-tree for larger dictionaries.
-func generateSuggestions(word string, dictionary map[string]struct{}) []string {
-	if len(word) > maxSuggestionWordLength {
-		return nil
-	}
-	// For small dictionaries, use the simple approach
-	if len(dictionary) < 100 {
-		return simpleGenerateSuggestions(word, dictionary)
-	}
-
-	// For larger dictionaries, build a BK-tree
-	tree := NewBKTree(dictionary)
-	return rankSuggestions(tree.Search(strings.ToLower(word), levenshteinThreshold))
-}
-
 // simpleGenerateSuggestions is the brute-force implementation for small dictionaries.
 func simpleGenerateSuggestions(word string, dictionary map[string]struct{}) []string {
 	if len(word) > maxSuggestionWordLength {
