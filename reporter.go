@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -488,4 +489,70 @@ func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) {
 			}
 		}
 	}
+}
+
+// --- JSON report ---
+
+// jsonTypo is the JSON shape of a single misspelled word.
+type jsonTypo struct {
+	Word        string   `json:"word"`
+	Line        int      `json:"line"`
+	Column      int      `json:"column"`
+	Suggestions []string `json:"suggestions"`
+}
+
+// jsonFile groups typos by source file.
+type jsonFile struct {
+	File  string     `json:"file"`
+	Typos []jsonTypo `json:"typos"`
+}
+
+// jsonReport is the top-level JSON document.
+type jsonReport struct {
+	Summary struct {
+		Files       int `json:"files"`
+		Typos       int `json:"typos"`
+		Suggestions int `json:"suggestions"`
+	} `json:"summary"`
+	Files []jsonFile `json:"files"`
+}
+
+// generateJSONReport writes a machine-readable report. Files are sorted by path
+// for deterministic output, and empty suggestion lists serialize as [] (not null).
+func generateJSONReport(writer io.Writer, results map[string][]MisspelledWord) error {
+	var report jsonReport
+	totalFiles, totalTypos, totalSuggestions := summarizeStats(results)
+	report.Summary.Files = totalFiles
+	report.Summary.Typos = totalTypos
+	report.Summary.Suggestions = totalSuggestions
+
+	paths := make([]string, 0, len(results))
+	for p := range results {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	report.Files = make([]jsonFile, 0, len(paths))
+	for _, p := range paths {
+		words := results[p]
+		jf := jsonFile{File: p, Typos: make([]jsonTypo, 0, len(words))}
+		for _, m := range words {
+			suggestions := m.Suggestions
+			if suggestions == nil {
+				suggestions = []string{}
+			}
+			jf.Typos = append(jf.Typos, jsonTypo{
+				Word:        m.Word,
+				Line:        m.LineNumber,
+				Column:      m.Column,
+				Suggestions: suggestions,
+			})
+		}
+		report.Files = append(report.Files, jf)
+	}
+
+	enc := json.NewEncoder(writer)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc.Encode(report)
 }

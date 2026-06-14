@@ -21,7 +21,7 @@ var dictionaryData []byte
 
 func loadDictionary(customPath string) (map[string]struct{}, error) {
 	if customPath != "" {
-		fmt.Printf("Loading custom dictionary from: %s\n", customPath)
+		fmt.Fprintf(os.Stderr, "Loading custom dictionary from: %s\n", customPath)
 		file, err := os.Open(customPath)
 		if err != nil {
 			return nil, fmt.Errorf("could not open custom dictionary: %w", err)
@@ -30,7 +30,7 @@ func loadDictionary(customPath string) (map[string]struct{}, error) {
 		return parseDictionary(file)
 	}
 
-	fmt.Println("Loading dictionary from embedded data.")
+	fmt.Fprintln(os.Stderr, "Loading dictionary from embedded data.")
 	return parseEmbeddedDictionary(dictionaryData)
 }
 

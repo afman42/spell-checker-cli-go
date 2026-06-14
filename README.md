@@ -11,9 +11,10 @@ typos with ranked "did you mean?" suggestions.
 - **Helpful** — ranked suggestions, colored terminal output, live progress bar.
 - **Unicode-aware** — handles accents (café), contractions (don't, it's),
   hyphenated words (state-of-the-art).
-- **Multiple outputs** — plain text with colors or responsive dark-mode HTML.
+- **Multiple outputs** — plain text with colors, responsive dark-mode HTML, or machine-readable JSON.
+- **Auto-fix** — `--fix` rewrites each typo to its top suggestion in place (with `--dry-run`).
 - **Watch mode** — `fsnotify` re-checks files automatically as you save.
-- **CI-friendly** — exits with code 1 when typos are found.
+- **CI-friendly** — JSON output and exit code 1 when typos are found.
 
 ---
 
@@ -57,8 +58,10 @@ go build -o spellchecker .
 | `--dict` | Custom CSV dictionary | `--dict my_words.csv` |
 | `--personal-dict` | Extra words to ignore (one per line) | `--personal-dict .words.txt` |
 | `--exclude` | Comma-separated glob patterns to skip | `--exclude "*.log,*.tmp"` |
-| `--format` | Output format: `txt` or `html` | `--format html` |
+| `--format` | Output format: `txt`, `html`, or `json` | `--format json` |
 | `--output` | Write report to file or directory | `--output report.html` |
+| `--fix` | Rewrite each typo to its top suggestion, in place | `--fix` |
+| `--dry-run` | With `--fix`: show changes without writing | `--fix --dry-run` |
 | `--watch` | Watch a directory and re-check on save | `--watch` |
 | `--verbose` | Log skipped (excluded/binary) files | `--verbose` |
 
@@ -81,6 +84,15 @@ Settings precedence: **flags > config file > defaults**.
 
 # Ignore project-specific words
 ./spellchecker --personal-dict .project-words.txt ./src/
+
+# Emit machine-readable JSON (for CI / editors)
+./spellchecker --format json ./my_project/
+
+# Auto-fix typos in place (top suggestion wins)
+./spellchecker --fix ./my_project/
+
+# Preview fixes without writing any files
+./spellchecker --fix --dry-run ./my_project/
 
 # Watch a source folder during development
 ./spellchecker --watch ./src/
@@ -134,6 +146,52 @@ Typos found:
 - A live progress bar (`█░`) shows on stderr during large scans.
 - Writing to a file or pipe produces plain text (no colors, no progress bar).
 - Exit code **1** if any typos are found, otherwise **0**.
+
+#### JSON output
+
+`--format json` (or `--output report.json`) emits a structured document. All
+diagnostic messages go to stderr, so stdout is clean and pipeable:
+
+```bash
+./spellchecker --format json notes.txt | jq '.summary'
+```
+
+```json
+{
+  "summary": { "files": 1, "typos": 1, "suggestions": 5 },
+  "files": [
+    {
+      "file": "notes.txt",
+      "typos": [
+        { "word": "wrld", "line": 2, "column": 5,
+          "suggestions": ["wald", "weld", "wild", "wold", "world"] }
+      ]
+    }
+  ]
+}
+```
+
+Files are sorted by path for deterministic output, and words with no suggestion
+serialize as `"suggestions": []`.
+
+#### Fix mode
+
+`--fix` rewrites each typo to its top-ranked suggestion, in place. Writes are
+atomic (temp file + rename) and file permissions are preserved.
+
+```bash
+./spellchecker --fix ./src/             # apply fixes
+./spellchecker --fix --dry-run ./src/   # preview only, write nothing
+```
+
+- Typos with no suggestion are left untouched and reported as skipped.
+- A real fix exits **0** (files were corrected); `--dry-run` exits **1** if
+  typos remain, so it still fails CI.
+- Fix mode does not read from stdin.
+
+> Note: the "top suggestion" is ranked by edit distance, then alphabetically —
+> so `wrld` becomes `wald`, not `world`. Review changes (or use `--dry-run`)
+> before committing automated fixes.
 
 ---
 
@@ -191,7 +249,8 @@ git commit --no-verify
 ├── checker.go           Scanner, concurrent worker pool, word tokenizer
 ├── dictionary.go        Dictionary loading (zstd-compressed embedded dict)
 ├── suggestions.go       BK-tree + Levenshtein distance for suggestions
-├── reporter.go          Text and HTML output generation
+├── reporter.go          Text, HTML, and JSON output generation
+├── fixer.go             Auto-fix mode (--fix / --dry-run), atomic writes
 ├── watcher.go           fsnotify-based watch mode
 ├── gen_dict.go          Dictionary generator (//go:build ignore)
 ├── Makefile                 Build, test, lint, benchmark targets
