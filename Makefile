@@ -78,7 +78,7 @@ setup:
 dict: dictionary.txt.zst
 
 dictionary.txt.zst: dictionary.csv gen_dict.go
-	go run gen_dict.go
+	GOOS= GOARCH= go run gen_dict.go
 
 # -------------------------------------------------------------------
 # Code quality
