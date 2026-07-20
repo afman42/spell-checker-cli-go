@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -20,149 +21,22 @@ const (
 	ansiBold  = "\033[1m"
 )
 
-// --- Modern HTML template with dark mode, responsive design, and polished UI ---
+// styleCSS is the stylesheet shared by the single-file and multi-file HTML
+// reports. Embedded at compile time so the binary stays self-contained.
+//
+//go:embed style.css
+var styleCSS string
 
-const htmlDocType = `<!DOCTYPE html>
+// htmlDocType is the reusable HTML document prefix (DOCTYPE, head, opening
+// body/container tags). The CSS is injected from the embedded style.css.
+var htmlDocType = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Spell Check Report</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --bg: #ffffff; --surface: #f8f9fa; --border: #e0e0e0;
-    --text: #1a1a2e; --text-muted: #6c757d;
-    --primary: #4361ee; --primary-hover: #3a56d4;
-    --accent: #f72585; --accent-green: #06d6a0;
-    --error: #e63946; --suggestion: #4361ee;
-    --shadow: 0 2px 8px rgba(0,0,0,0.08);
-    --radius: 8px;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f0f23; --surface: #1a1a3e; --border: #2a2a5e;
-      --text: #e0e0f0; --text-muted: #8888aa;
-      --primary: #5e7ce2; --primary-hover: #7b96ff;
-      --accent: #f72585; --accent-green: #06d6a0;
-      --error: #ff6b6b; --suggestion: #5e7ce2;
-      --shadow: 0 2px 8px rgba(0,0,0,0.3);
-    }
-  }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background: var(--bg); color: var(--text);
-    line-height: 1.6; padding: 24px; min-height: 100vh;
-  }
-  .container { max-width: 960px; margin: 0 auto; }
-
-  /* Header */
-  header { margin-bottom: 32px; }
-  h1 {
-    font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em;
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  }
-  h1 .badge {
-    font-size: 0.75rem; font-weight: 600; padding: 4px 12px;
-    border-radius: 20px; background: var(--primary); color: #fff;
-  }
-  h1 .badge.clean { background: var(--accent-green); color: #000; }
-  h1 .badge.dirty { background: var(--error); }
-  .meta {
-    margin-top: 8px; font-size: 0.85rem; color: var(--text-muted);
-    display: flex; gap: 16px; flex-wrap: wrap;
-  }
-  .stats {
-    display: flex; gap: 16px; flex-wrap: wrap; margin: 24px 0;
-  }
-  .stat-card {
-    flex: 1; min-width: 120px; padding: 16px 20px;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); box-shadow: var(--shadow);
-    text-align: center;
-  }
-  .stat-card .value {
-    font-size: 1.5rem; font-weight: 700; line-height: 1.2;
-  }
-  .stat-card .label {
-    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--text-muted); margin-top: 4px;
-  }
-  .stat-card .value.error { color: var(--error); }
-  .stat-card .value.clean { color: var(--accent-green); }
-  .stat-card .value.suggestion { color: var(--suggestion); }
-
-  /* Navigation / Back link */
-  .nav-link {
-    display: inline-flex; align-items: center; gap: 6px;
-    color: var(--primary); text-decoration: none; font-size: 0.9rem;
-    margin-bottom: 16px; font-weight: 500;
-  }
-  .nav-link:hover { color: var(--primary-hover); text-decoration: underline; }
-
-  /* File list (index page) */
-  .file-list { list-style: none; padding: 0; }
-  .file-item {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 18px; margin-bottom: 8px;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); box-shadow: var(--shadow);
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-    flex-wrap: wrap; gap: 8px;
-  }
-  .file-item:hover {
-    transform: translateY(-1px); box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-  }
-  .file-item a {
-    color: var(--primary); text-decoration: none; font-weight: 500;
-    word-break: break-all;
-  }
-  .file-item a:hover { color: var(--primary-hover); text-decoration: underline; }
-  .file-item .typo-count {
-    font-size: 0.8rem; font-weight: 600; white-space: nowrap;
-  }
-  .file-item .typo-count.error { color: var(--error); }
-  .file-item .typo-count.clean { color: var(--accent-green); }
-
-  /* Tables */
-  table {
-    width: 100%; border-collapse: separate; border-spacing: 0;
-    margin: 16px 0; border-radius: var(--radius); overflow: hidden;
-    box-shadow: var(--shadow);
-  }
-  th {
-    background: var(--primary); color: #fff; font-weight: 600;
-    padding: 12px 16px; text-align: left; font-size: 0.85rem;
-    text-transform: uppercase; letter-spacing: 0.04em;
-  }
-  td {
-    padding: 12px 16px; border-bottom: 1px solid var(--border);
-    background: var(--surface); font-size: 0.9rem;
-  }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: color-mix(in srgb, var(--primary) 8%, var(--surface)); }
-  td.word { font-weight: 600; color: var(--error); }
-  td.suggestions { color: var(--suggestion); }
-  td.line,
-  td.col { text-align: center; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; }
-
-  /* Empty state */
-  .empty-state {
-    text-align: center; padding: 48px 24px;
-    color: var(--text-muted); font-size: 1.1rem;
-  }
-  .empty-state .icon { font-size: 3rem; margin-bottom: 16px; }
-
-  /* Responsive */
-  @media (max-width: 640px) {
-    body { padding: 12px; }
-    h1 { font-size: 1.35rem; }
-    .stats { flex-direction: column; }
-    .stat-card { min-width: auto; }
-    th, td { padding: 8px 10px; font-size: 0.8rem; }
-    .file-item { padding: 10px 14px; }
-    table { font-size: 0.8rem; }
-  }
+` + styleCSS + `
 </style>
 </head>
 <body>
@@ -376,22 +250,17 @@ func generateSingleReportFile(outputDir, filename, filePath string, words []Miss
 	return nil
 }
 
-// relLink computes a relative URL from the current report filename to a target filename.
-// Both filenames use forward slashes (as produced by safeReportPath).
+// relLink computes a relative URL from the current report filename to a target
+// filename. Both filenames use forward slashes (as produced by safeReportPath).
+// The result is the minimal relative path (e.g. "../d.html", not
+// "../../a/d.html") so multi-file report navigation stays clean.
 func relLink(current, target string) string {
-	curDir := filepath.Dir(current)
-	targetDir := filepath.Dir(target)
-	// Same directory — just use the target's base name.
-	if curDir == targetDir {
-		return filepath.Base(target)
-	}
-	if curDir == "." {
+	curDir := filepath.ToSlash(filepath.Dir(current))
+	rel, err := filepath.Rel(curDir, filepath.ToSlash(target))
+	if err != nil {
 		return target
 	}
-	// Walk up from current's directory to the common ancestor, then back down.
-	parts := strings.Split(curDir, "/")
-	up := strings.Repeat("../", len(parts))
-	return up + target
+	return filepath.ToSlash(rel)
 }
 
 // --- Single-file HTML report ---
@@ -454,6 +323,25 @@ func writeStatsBar(w io.Writer, totalFiles, totalTypos, totalSuggestions int) {
 
 // --- Text report with optional terminal colors ---
 
+// formatTypoLine renders a single misspelled word as a report line (without
+// the leading bullet/prefix). Callers may pass pre-colored word and
+// suggestion strings for terminal output; pass empty strings to use the raw
+// values. The "Did you mean: ...?" suffix is only appended when suggestions
+// exist, keeping the reporter and watcher in sync.
+func formatTypoLine(m MisspelledWord, word, suggestions string) string {
+	if word == "" {
+		word = m.Word
+	}
+	if suggestions == "" && len(m.Suggestions) > 0 {
+		suggestions = strings.Join(m.Suggestions, ", ")
+	}
+	base := fmt.Sprintf("Line %d, Col %d: \"%s\" appears to be a typo.", m.LineNumber, m.Column, word)
+	if len(m.Suggestions) > 0 {
+		return fmt.Sprintf("%s Did you mean: %s?", base, suggestions)
+	}
+	return base
+}
+
 func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) {
 	useColors := false
 	if f, ok := writer.(*os.File); ok {
@@ -470,7 +358,17 @@ func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) {
 		return
 	}
 	fmt.Fprintf(writer, "Typos found (%d total):\n", totalTypos)
-	for file, words := range results {
+
+	// Sort file paths for deterministic output. HTML and JSON already do this;
+	// text was the only format whose line order varied run-to-run.
+	paths := make([]string, 0, len(results))
+	for p := range results {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	for _, file := range paths {
+		words := results[file]
 		fmt.Fprintf(writer, "\n--- In file %s ---\n", file)
 		for _, m := range words {
 			word := m.Word
@@ -481,12 +379,7 @@ func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) {
 					suggestionsStr = ansiGreen + suggestionsStr + ansiReset
 				}
 			}
-			baseMessage := fmt.Sprintf("- Line %d, Col %d: \"%s\" appears to be a typo.", m.LineNumber, m.Column, word)
-			if len(m.Suggestions) > 0 {
-				fmt.Fprintf(writer, "%s Did you mean: %s?\n", baseMessage, suggestionsStr)
-			} else {
-				fmt.Fprintln(writer, baseMessage)
-			}
+			fmt.Fprintf(writer, "- %s\n", formatTypoLine(m, word, suggestionsStr))
 		}
 	}
 }

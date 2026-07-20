@@ -27,6 +27,59 @@ func TestGenerateTextReport(t *testing.T) {
 	}
 }
 
+// TestGenerateTextReportDeterminism verifies the text report emits files in
+// sorted path order, not map-iteration order. Previously only HTML and JSON
+// sorted; text output varied run-to-run.
+func TestGenerateTextReportDeterminism(t *testing.T) {
+	results := map[string][]MisspelledWord{
+		"zebra.txt": {{Word: "wrld", LineNumber: 1, Column: 1, Suggestions: []string{"world"}}},
+		"alpha.txt": {{Word: "eror", LineNumber: 1, Column: 1, Suggestions: []string{"error"}}},
+		"mid.txt":   {{Word: "helo", LineNumber: 1, Column: 1, Suggestions: []string{"hello"}}},
+	}
+	var buf bytes.Buffer
+	generateTextReport(&buf, results)
+	out := buf.String()
+	// alpha.txt must appear before mid.txt, which must appear before zebra.txt.
+	iAlpha := strings.Index(out, "alpha.txt")
+	iMid := strings.Index(out, "mid.txt")
+	iZebra := strings.Index(out, "zebra.txt")
+	if iAlpha < 0 || iMid < 0 || iZebra < 0 {
+		t.Fatalf("missing file headers in output:\n%s", out)
+	}
+	if !(iAlpha < iMid && iMid < iZebra) {
+		t.Errorf("text report not sorted: alpha=%d mid=%d zebra=%d\n%s", iAlpha, iMid, iZebra, out)
+	}
+}
+
+// TestFormatTypoLine verifies the shared formatting helper used by both the
+// text reporter and the watcher. It must append "Did you mean: ...?" only when
+// suggestions exist, and must use the provided (possibly colored) strings.
+func TestFormatTypoLine(t *testing.T) {
+	withSuggest := MisspelledWord{Word: "wrld", LineNumber: 2, Column: 5, Suggestions: []string{"world", "wild"}}
+	got := formatTypoLine(withSuggest, "", "")
+	want := `Line 2, Col 5: "wrld" appears to be a typo. Did you mean: world, wild?`
+	if got != want {
+		t.Errorf("with suggestions: got %q, want %q", got, want)
+	}
+
+	noSuggest := MisspelledWord{Word: "zzzz", LineNumber: 3, Column: 2, Suggestions: nil}
+	got = formatTypoLine(noSuggest, "", "")
+	want = `Line 3, Col 2: "zzzz" appears to be a typo.`
+	if got != want {
+		t.Errorf("no suggestions: got %q, want %q", got, want)
+	}
+
+	// Explicit overrides (for ANSI color pass-through). Use the same ANSI
+	// constants as the reporter so both sides agree on the exact bytes.
+	coloredWord := ansiBold + ansiRed + "wrld" + ansiReset
+	coloredSugg := ansiGreen + "world" + ansiReset
+	got = formatTypoLine(withSuggest, coloredWord, coloredSugg)
+	want = `Line 2, Col 5: "` + coloredWord + `" appears to be a typo. Did you mean: ` + coloredSugg + `?`
+	if got != want {
+		t.Errorf("colored override: got %q, want %q", got, want)
+	}
+}
+
 // IMPROVED: Check for the new "Suggestions" table header.
 func TestGenerateHTMLReport(t *testing.T) {
 	results := map[string][]MisspelledWord{
@@ -243,7 +296,8 @@ func TestGenerateMultiFileHTMLReportCollision(t *testing.T) {
 }
 
 // TestRelLink verifies relative URL computation between report files in the
-// same directory, across subdirectories, and from the root.
+// same directory, across subdirectories, and from the root. The result must
+// be the minimal relative path (e.g. "../d.html" not "../../a/d.html").
 func TestRelLink(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -256,6 +310,10 @@ func TestRelLink(t *testing.T) {
 		{"current nested two levels", "a/b/c.html", "index.html", "../../index.html"},
 		{"both in same subdir", "src/a.html", "src/b.html", "b.html"},
 		{"current at root, target in subdir", "index.html", "src/a.html", "src/a.html"},
+		// Minimal path: the old implementation always climbed to root, producing
+		// "../../a/d.html" instead of the correct "../d.html".
+		{"sibling subdir minimal path", "a/b/c.html", "a/d.html", "../d.html"},
+		{"cousin subdir minimal path", "a/b/x.html", "c/d/y.html", "../../c/d/y.html"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

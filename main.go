@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/pflag"
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 // OutputFormat represents valid output formats
@@ -22,23 +22,23 @@ const (
 
 type Config struct {
 	// Exclude is a list of file patterns to exclude.
-	Exclude []string `mapstructure:"exclude"`
+	Exclude []string `yaml:"exclude"`
 	// Dictionary is the path to a custom dictionary file.
-	Dictionary string `mapstructure:"dictionary"`
+	Dictionary string `yaml:"dictionary"`
 	// PersonalDictionary is the path to a personal word list.
-	PersonalDictionary string `mapstructure:"personal-dictionary"`
+	PersonalDictionary string `yaml:"personal-dictionary"`
 	// Format is the output format (txt, html, json).
-	Format OutputFormat `mapstructure:"format"`
+	Format OutputFormat `yaml:"format"`
 	// Verbose enables verbose logging.
-	Verbose bool `mapstructure:"verbose"`
+	Verbose bool `yaml:"verbose"`
 	// Output is the path for the report file or directory.
-	Output string `mapstructure:"output"`
+	Output string `yaml:"output"`
 	// Watch enables file watching mode.
-	Watch bool `mapstructure:"watch"`
+	Watch bool `yaml:"watch"`
 	// Fix enables auto-correcting typos to their top suggestion.
-	Fix bool `mapstructure:"fix"`
+	Fix bool `yaml:"fix"`
 	// DryRun, with Fix, reports changes without writing them.
-	DryRun bool `mapstructure:"dry-run"`
+	DryRun bool `yaml:"dry-run"`
 }
 
 // Validate ensures the configuration is valid
@@ -54,57 +54,85 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// configSearchDirs returns the directories searched for spellchecker.yaml,
+// in precedence order (cwd first, then the user's config directory).
+func configSearchDirs() []string {
+	dirs := []string{"."}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(homeDir, ".config", "spellchecker"))
+	}
+	return dirs
+}
+
+// findConfigFile returns the path of the first spellchecker.yaml/yml found in
+// any of the given search directories, or "" if none exists.
+func findConfigFile(dirs []string) string {
+	for _, dir := range dirs {
+		for _, name := range []string{"spellchecker.yaml", "spellchecker.yml"} {
+			p := filepath.Join(dir, name)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
 // loadConfig initializes flags and loads configuration from a file and flags.
 // Precedence: Flags > Config File > Defaults.
 func loadConfig() (*Config, error) {
 	// --- Define Flags using pflag ---
-	// pflag is a drop-in replacement for Go's flag package with more features.
-	pflag.StringSlice("exclude", []string{}, "Optional: comma-separated list of file patterns to exclude.")
-	pflag.String("dict", "", "Optional: path to a custom CSV dictionary file.")
-	pflag.String("personal-dict", "", "Optional: path to a personal dictionary file (one word per line).")
-	pflag.String("output", "", "Optional: path to an output file or directory (for HTML reports).")
-	pflag.String("format", "", "Optional: output format (txt, html, json). Overrides filename extension.")
-	pflag.Bool("verbose", false, "Enable verbose logging to show skipped files and directories.")
-	pflag.Bool("watch", false, "Watch directory for changes and re-check files on save.")
-	pflag.Bool("fix", false, "Rewrite each typo to its top suggestion, in place.")
-	pflag.Bool("dry-run", false, "With --fix: report what would change without writing files.")
+	excludeFlag := pflag.StringSlice("exclude", nil, "Optional: comma-separated list of file patterns to exclude.")
+	dictFlag := pflag.String("dict", "", "Optional: path to a custom CSV dictionary file.")
+	personalDictFlag := pflag.String("personal-dict", "", "Optional: path to a personal dictionary file (one word per line).")
+	outputFlag := pflag.String("output", "", "Optional: path to an output file or directory (for HTML reports).")
+	formatFlag := pflag.String("format", "", "Optional: output format (txt, html, json). Overrides filename extension.")
+	verboseFlag := pflag.Bool("verbose", false, "Enable verbose logging to show skipped files and directories.")
+	watchFlag := pflag.Bool("watch", false, "Watch directory for changes and re-check files on save.")
+	fixFlag := pflag.Bool("fix", false, "Rewrite each typo to its top suggestion, in place.")
+	dryRunFlag := pflag.Bool("dry-run", false, "With --fix: report what would change without writing files.")
 	pflag.Parse()
 
-	// --- Initialize Viper ---
-	v := viper.New()
-	// Set the name of the config file (without extension).
-	v.SetConfigName("spellchecker")
-	// Add search paths for the config file.
-	v.AddConfigPath(".") // Look in the current directory.
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		v.AddConfigPath(filepath.Join(homeDir, ".config", "spellchecker"))
-	}
-
-	// --- Bind pflags to Viper ---
-	// This tells Viper to check the flag value if a key is not found in the config file.
-	v.BindPFlag("exclude", pflag.Lookup("exclude"))
-	v.BindPFlag("dictionary", pflag.Lookup("dict"))
-	v.BindPFlag("personal-dictionary", pflag.Lookup("personal-dict"))
-	v.BindPFlag("output", pflag.Lookup("output"))
-	v.BindPFlag("format", pflag.Lookup("format"))
-	v.BindPFlag("verbose", pflag.Lookup("verbose"))
-	v.BindPFlag("watch", pflag.Lookup("watch"))
-	v.BindPFlag("fix", pflag.Lookup("fix"))
-	v.BindPFlag("dry-run", pflag.Lookup("dry-run"))
-
-	// --- Read Config File ---
-	// Find and read the config file.
-	if err := v.ReadInConfig(); err != nil {
-		// It's okay if the config file doesn't exist.
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+	// --- Load Config File (YAML) ---
+	cfg := &Config{}
+	if path := findConfigFile(configSearchDirs()); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
 			return nil, fmt.Errorf("error reading config file: %w", err)
+		}
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
 	}
 
-	// --- Unmarshal to Struct ---
-	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("error unmarshaling config: %w", err)
+	// --- Apply flags (flags > config > defaults) ---
+	// Only override when the flag was explicitly set on the command line.
+	if pflag.Lookup("exclude").Changed {
+		cfg.Exclude = *excludeFlag
+	}
+	if pflag.Lookup("dict").Changed {
+		cfg.Dictionary = *dictFlag
+	}
+	if pflag.Lookup("personal-dict").Changed {
+		cfg.PersonalDictionary = *personalDictFlag
+	}
+	if pflag.Lookup("output").Changed {
+		cfg.Output = *outputFlag
+	}
+	if pflag.Lookup("format").Changed {
+		cfg.Format = OutputFormat(*formatFlag)
+	}
+	if pflag.Lookup("verbose").Changed {
+		cfg.Verbose = *verboseFlag
+	}
+	if pflag.Lookup("watch").Changed {
+		cfg.Watch = *watchFlag
+	}
+	if pflag.Lookup("fix").Changed {
+		cfg.Fix = *fixFlag
+	}
+	if pflag.Lookup("dry-run").Changed {
+		cfg.DryRun = *dryRunFlag
 	}
 
 	// Validate the configuration
@@ -112,7 +140,7 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("configuration validation error: %w", err)
 	}
 
-	return &cfg, nil
+	return cfg, nil
 }
 
 func main() {
@@ -194,13 +222,19 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Fix mode does not support stdin.")
 			os.Exit(1)
 		}
-		if err := runFixer(allTypos, cfg.DryRun); err != nil {
+		_, skipped, err := runFixer(allTypos, cfg.DryRun)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fixing files: %v\n", err)
 			os.Exit(1)
 		}
-		// In dry-run we still signal typos via exit code; after a real fix the
-		// files are corrected, so exit 0.
+		// Dry-run: signal typos via exit code 1 so CI still fails.
+		// Real fix: exit 0 only if every typo was correctable. Skipped typos
+		// (no suggestion) remain in the files, so CI should fail to surface
+		// them for manual review.
 		if cfg.DryRun && len(allTypos) > 0 {
+			os.Exit(1)
+		}
+		if !cfg.DryRun && skipped > 0 {
 			os.Exit(1)
 		}
 		return

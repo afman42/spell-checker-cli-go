@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -155,7 +156,13 @@ func debounceAndProcess(eventCh <-chan string, dict *ConcurrentDictionary) {
 
 func processBatch(files map[string]struct{}, dict *ConcurrentDictionary) {
 	timestamp := time.Now().Format("15:04:05")
+	// Sort paths for deterministic batch output.
+	paths := make([]string, 0, len(files))
 	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
 		typos, err := checkFile(path, dict)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] Error checking %s: %v\n", timestamp, path, err)
@@ -167,13 +174,7 @@ func processBatch(files map[string]struct{}, dict *ConcurrentDictionary) {
 		}
 		fmt.Printf("[%s] %s\n", timestamp, path)
 		for _, m := range typos {
-			baseMsg := fmt.Sprintf("  - Line %d, Col %d: \"%s\" appears to be a typo.", m.LineNumber, m.Column, m.Word)
-			if len(m.Suggestions) > 0 {
-				suggestionsStr := strings.Join(m.Suggestions, ", ")
-				fmt.Printf("%s Did you mean: %s?\n", baseMsg, suggestionsStr)
-			} else {
-				fmt.Println(baseMsg)
-			}
+			fmt.Printf("  - %s\n", formatTypoLine(m, m.Word, strings.Join(m.Suggestions, ", ")))
 		}
 	}
 }

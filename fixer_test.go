@@ -141,8 +141,37 @@ func TestFixFilePreservesMode(t *testing.T) {
 
 // TestRunFixerEmpty verifies a no-typo run is a clean no-op.
 func TestRunFixerEmpty(t *testing.T) {
-	if err := runFixer(map[string][]MisspelledWord{}, false); err != nil {
+	fixed, skipped, err := runFixer(map[string][]MisspelledWord{}, false)
+	if err != nil {
 		t.Errorf("expected nil error for empty results, got %v", err)
+	}
+	if fixed != 0 || skipped != 0 {
+		t.Errorf("expected (0,0) counts, got (%d,%d)", fixed, skipped)
+	}
+}
+
+// TestRunFixerReturnsCounts verifies fixed and skipped counts are returned so
+// main can pick the right exit code.
+func TestRunFixerReturnsCounts(t *testing.T) {
+	dir := t.TempDir()
+	// file A: one fixable typo + one unfixable (no suggestion)
+	pathA := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(pathA, []byte("hello wrld zzzzzzzzzz\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// "wrld" -> "world"; "zzzzzzzzzz" has no close word so it's skipped.
+	dict := map[string]struct{}{"hello": {}, "world": {}, "completely": {}, "different": {}}
+	typos := detectTypos(t, pathA, dict)
+
+	fixed, skipped, err := runFixer(map[string][]MisspelledWord{pathA: typos}, false)
+	if err != nil {
+		t.Fatalf("runFixer: %v", err)
+	}
+	if fixed != 1 {
+		t.Errorf("expected 1 fixed, got %d", fixed)
+	}
+	if skipped == 0 {
+		t.Errorf("expected skipped > 0, got %d", skipped)
 	}
 }
 

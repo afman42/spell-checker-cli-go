@@ -27,10 +27,14 @@ type fixKey struct {
 // When dryRun is true, nothing is written; the function only reports what it
 // would change. Files are rewritten using a temp-file + rename so a failure
 // never leaves a half-written file.
-func runFixer(results map[string][]MisspelledWord, dryRun bool) error {
+//
+// Returns the total number of fixed and skipped typos so callers (e.g. main)
+// can decide an exit code: a real fix that leaves skipped typos behind still
+// counts as "typos remain" and should fail CI.
+func runFixer(results map[string][]MisspelledWord, dryRun bool) (totalFixed, totalSkipped int, err error) {
 	if len(results) == 0 {
 		fmt.Println("No typos to fix.")
-		return nil
+		return 0, 0, nil
 	}
 
 	paths := make([]string, 0, len(results))
@@ -39,11 +43,11 @@ func runFixer(results map[string][]MisspelledWord, dryRun bool) error {
 	}
 	sort.Strings(paths)
 
-	totalFixed, totalSkipped, filesChanged := 0, 0, 0
+	filesChanged := 0
 	for _, path := range paths {
 		res, err := fixFile(path, results[path], dryRun)
 		if err != nil {
-			return fmt.Errorf("fixing %s: %w", path, err)
+			return totalFixed, totalSkipped, fmt.Errorf("fixing %s: %w", path, err)
 		}
 		totalFixed += res.Fixes
 		totalSkipped += res.Skipped
@@ -62,7 +66,7 @@ func runFixer(results map[string][]MisspelledWord, dryRun bool) error {
 		fmt.Printf(" %d typo(s) had no suggestion and were left unchanged.", totalSkipped)
 	}
 	fmt.Println()
-	return nil
+	return totalFixed, totalSkipped, nil
 }
 
 func reportFixFile(res FixResult, dryRun bool) {
@@ -139,7 +143,8 @@ func replaceLine(line string, lineNumber int, repl map[fixKey]string, res *FixRe
 }
 
 // writeAtomic writes content to a temp file in the same directory, then renames
-// it over the target so readers never see a partial write.
+// it over the target so readers never see a partial write. The temp file is
+// fsynced before the rename so a crash doesn't leave a renamed-but-empty file.
 func writeAtomic(path, content string) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".spellfix-*")
@@ -150,6 +155,13 @@ func writeAtomic(path, content string) error {
 	defer os.Remove(tmpName) // no-op if rename succeeds
 
 	if _, err := io.WriteString(tmp, content); err != nil {
+		tmp.Close()
+		return err
+	}
+	// Durability: flush the temp file's data to disk before swapping it in.
+	// Without this, a crash after rename can leave the target file empty
+	// because the rename is durable but the data write is not.
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
 	}

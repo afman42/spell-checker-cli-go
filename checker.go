@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -129,14 +130,13 @@ func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDic
 	}
 
 	allTypos := make(map[string][]MisspelledWord)
-	var workerErr error
+	var errs []error
 	for result := range results {
 		processed.Add(1)
 		if result.Err != nil {
 			errored.Add(1)
-			if workerErr == nil {
-				workerErr = result.Err
-			}
+			errs = append(errs, result.Err)
+			continue
 		}
 		if len(result.Typos) > 0 {
 			allTypos[result.FilePath] = result.Typos
@@ -148,8 +148,10 @@ func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDic
 		fmt.Fprint(os.Stderr, "\r"+strings.Repeat(" ", 80)+"\r")
 	}
 
-	if workerErr != nil {
-		return nil, workerErr
+	// Surface every worker failure, not just the first. Successful files are
+	// still returned so the user gets a report even when some files error out.
+	if len(errs) > 0 {
+		return allTypos, errors.Join(errs...)
 	}
 	return allTypos, nil
 }
@@ -275,9 +277,17 @@ func checkFile(filePath string, dictionary *ConcurrentDictionary) ([]MisspelledW
 
 // scanForTypos reads a stream line by line and returns misspelled words with
 // 1-based line and (rune) column positions.
+// scanBufferSize caps the per-line buffer for scanForTypos. Matches fixFile's
+// limit so the checker and fixer never disagree on what constitutes a "line".
+const scanBufferSize = 1024 * 1024 // 1 MiB
+
 func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
 	var misspelledWords []MisspelledWord
 	scanner := bufio.NewScanner(r)
+	// Allow long lines (e.g. minified JS) instead of failing at the default
+	// 64 KiB token limit. Keep the same cap as fixFile so re-tokenization in
+	// the fixer sees the same lines the checker did.
+	scanner.Buffer(make([]byte, 0, 64*1024), scanBufferSize)
 	lineNumber := 0
 	for scanner.Scan() {
 		lineNumber++
@@ -303,6 +313,13 @@ func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWo
 func shouldExclude(filePath string, patterns []string) (bool, error) {
 	fileName := filepath.Base(filePath)
 	for _, pattern := range patterns {
+		// Normalize trailing slashes so "build/" works like "build" — the
+		// README advertises both forms, and filepath.Match would otherwise
+		// fail to match a directory whose name has no trailing slash.
+		pattern = strings.TrimRight(pattern, `/\`)
+		if pattern == "" {
+			continue
+		}
 		matched, err := filepath.Match(pattern, fileName)
 		if err != nil {
 			return false, err

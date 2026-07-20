@@ -14,7 +14,7 @@ typos with ranked "did you mean?" suggestions.
 - **Multiple outputs** — plain text with colors, responsive dark-mode HTML, or machine-readable JSON.
 - **Auto-fix** — `--fix` rewrites each typo to its top suggestion in place (with `--dry-run`).
 - **Watch mode** — `fsnotify` re-checks files automatically as you save.
-- **CI-friendly** — JSON output and exit code 1 when typos are found.
+- **CI-friendly** — deterministic output, machine-readable JSON, and exit code 1 when typos are found or remain unfixed.
 
 ---
 
@@ -65,7 +65,32 @@ go build -o spellchecker .
 | `--watch` | Watch a directory and re-check on save | `--watch` |
 | `--verbose` | Log skipped (excluded/binary) files | `--verbose` |
 
-Settings precedence: **flags > config file > defaults**.
+Settings precedence: **flags > config file > defaults**. A flag only overrides
+the config file when explicitly passed on the command line, so a value set in
+`spellchecker.yaml` stays in effect if you run the binary without that flag.
+
+#### Exclude patterns
+
+`--exclude` accepts comma-separated glob patterns matched against each file or
+directory **name** (the basename, not the full path). Trailing slashes are
+stripped, so `build/` and `build` behave identically. Use `*` wildcards freely:
+
+| Pattern | Matches | Does not match |
+|---------|---------|----------------|
+| `*.log` | `error.log`, `debug.log` | `log.txt` |
+| `build` | a file or dir named `build` | `build/output.txt` (its contents) |
+| `build/` | same as `build` (trailing slash ignored) | — |
+| `node_modules` | a dir named `node_modules` (skipped recursively) | `node_modules_backup` |
+
+To skip a directory's contents, exclude the directory itself — `filepath.Walk`
+applies `SkipDir` so the whole subtree is pruned.
+
+#### Line length limit
+
+Lines up to **1 MiB** are scanned normally. Longer lines (e.g. heavily minified
+files) trigger a `bufio.ErrTooLong` error for that file rather than being
+silently truncated; the file is reported as errored and other files in the run
+still complete normally.
 
 ### Examples
 
@@ -100,8 +125,8 @@ Settings precedence: **flags > config file > defaults**.
 
 ### Config file
 
-Place a `spellchecker.yaml` in the current directory or
-`~/.config/spellchecker/`. It is picked up automatically.
+Place a `spellchecker.yaml` (or `spellchecker.yml`) in the current directory or
+`~/.config/spellchecker/`. It is picked up automatically — no flag needed.
 
 ```yaml
 exclude:
@@ -112,6 +137,10 @@ personal-dictionary: ".project-words.txt"
 format: "html"
 output: "./reports/"
 ```
+
+The cwd config wins over the home-directory config. Any flag you pass on the
+command line overrides the corresponding config key; keys you don't pass fall
+through to the config file, then to defaults.
 
 ### Dictionary formats
 
@@ -136,7 +165,7 @@ world,,The earth
 ### Output
 
 ```
-Typos found:
+Typos found (2 total):
 
 --- In file notes.txt ---
 - Line 2, Col 5: "wrld" appears to be a typo. Did you mean: wald, weld, wild, wold, world?
@@ -145,7 +174,21 @@ Typos found:
 - In a terminal, typos are **red** and suggestions **green**.
 - A live progress bar (`█░`) shows on stderr during large scans.
 - Writing to a file or pipe produces plain text (no colors, no progress bar).
-- Exit code **1** if any typos are found, otherwise **0**.
+- Files are listed in sorted path order for deterministic output across runs.
+
+#### Exit codes
+
+| Scenario | Exit code |
+|----------|-----------|
+| No typos found | `0` |
+| Typos found (default report mode) | `1` |
+| `--fix` applied and **every** typo was correctable | `0` |
+| `--fix` applied but some typos had no suggestion and were skipped | `1` |
+| `--fix --dry-run` with typos present | `1` |
+| Fatal error (config, dictionary load, file access) | `1` |
+
+The "skipped typos still fail CI" rule is intentional: uncorrected typos remain
+in the files, so CI should surface them for manual review rather than silently pass.
 
 #### JSON output
 
@@ -177,7 +220,8 @@ serialize as `"suggestions": []`.
 #### Fix mode
 
 `--fix` rewrites each typo to its top-ranked suggestion, in place. Writes are
-atomic (temp file + rename) and file permissions are preserved.
+atomic (temp file + `fsync` + rename) and file permissions are preserved, so a
+crash never leaves a half-written file.
 
 ```bash
 ./spellchecker --fix ./src/             # apply fixes
@@ -185,11 +229,12 @@ atomic (temp file + rename) and file permissions are preserved.
 ```
 
 - Typos with no suggestion are left untouched and reported as skipped.
-- A real fix exits **0** (files were corrected); `--dry-run` exits **1** if
-  typos remain, so it still fails CI.
+- Exit code reflects the result — see the [Exit codes](#exit-codes) table above.
+  In short: a clean fix exits `0`; a fix that left skipped typos behind exits `1`
+  so CI surfaces them for review.
 - Fix mode does not read from stdin.
 
-> Note: the "top suggestion" is ranked by edit distance, then alphabetically —
+> **Note:** the "top suggestion" is ranked by edit distance, then alphabetically —
 > so `wrld` becomes `wald`, not `world`. Review changes (or use `--dry-run`)
 > before committing automated fixes.
 
@@ -208,7 +253,7 @@ atomic (temp file + rename) and file permissions are preserved.
 | Target | Description |
 |--------|-------------|
 | `make` / `make all` | Build + test |
-| `make build` | Optimized binary (stripped, static, no CGO, ~5.7 MB) |
+| `make build` | Optimized binary (stripped, static, no CGO, ~5.3 MB) |
 | `make build-cross` | Cross-compile: `make build-cross GOOS=linux GOARCH=arm64` |
 | `make release` | Build + UPX compression (auto-detects `upx`) |
 | `make setup` | Activate the pre-commit hook (`git config core.hooksPath .githooks`) |
@@ -250,10 +295,11 @@ git commit --no-verify
 ├── dictionary.go        Dictionary loading (zstd-compressed embedded dict)
 ├── suggestions.go       BK-tree + Levenshtein distance for suggestions
 ├── reporter.go          Text, HTML, and JSON output generation
+├── style.css            Embedded stylesheet for HTML reports (//go:embed)
 ├── fixer.go             Auto-fix mode (--fix / --dry-run), atomic writes
 ├── watcher.go           fsnotify-based watch mode
 ├── gen_dict.go          Dictionary generator (//go:build ignore)
-├── main_test.go             Config validation edge-case tests
+├── main_test.go             Config validation + config-file loader tests
 ├── checker_test.go          Scanner, tokenizer, and file-collection tests
 ├── dictionary_test.go       Dictionary parsing/loading tests
 ├── suggestions_test.go      BK-tree + Levenshtein suggestion tests
@@ -274,12 +320,13 @@ git commit --no-verify
 
 | Component | What it does |
 |-----------|-------------|
-| **Worker pool** | Files are checked in parallel, one goroutine per CPU core |
-| **Word tokenizer** | Unicode-aware regex (`\p{L}+`) for accents, contractions, hyphens |
+| **Worker pool** | Files are checked in parallel, one goroutine per CPU core; multiple file errors are aggregated and reported together |
+| **Word tokenizer** | Unicode-aware regex (`\p{L}+`) for accents, contractions, hyphens; lines up to 1 MiB |
 | **Dictionary** | Zstd-compressed word list embedded at compile time; O(1) hash-set lookup |
 | **Suggestions** | BK-tree for O(log n) fuzzy search; Levenshtein edit distance ≤ 2 |
 | **Binary detection** | Files with null bytes in the first 512 bytes are skipped |
 | **Watch mode** | `fsnotify` watches directories, debounces rapid save events (200 ms) |
+| **Atomic writes** | `--fix` writes a temp file, `fsync`s it, then renames over the target — crash-safe and permission-preserving |
 
 ---
 

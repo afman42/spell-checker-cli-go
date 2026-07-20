@@ -24,6 +24,13 @@ func TestShouldExclude(t *testing.T) {
 		{"wildcard match", "report.log", []string{"*.log"}, true, false},
 		{"no match", "main.go", []string{"*.log"}, false, false},
 		{"directory match", "node_modules", []string{"node_modules"}, true, false},
+		// Trailing-slash normalization: "build/" should match a directory
+		// named "build" just like "build" does. The README advertises both
+		// forms; previously only the slash-less form worked.
+		{"trailing slash matches dir", "build", []string{"build/"}, true, false},
+		{"trailing slash no match", "main.go", []string{"build/"}, false, false},
+		{"backslash trailing normalized", "build", []string{"build\\"}, true, false},
+		{"empty pattern skipped", "any.txt", []string{""}, false, false},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -360,12 +367,43 @@ func TestScanForTyposCRLF(t *testing.T) {
 	}
 }
 
+// TestScanForTyposLongLine verifies the scanner buffer was raised so lines
+// between the default 64 KiB token limit and the 1 MiB cap are scanned
+// successfully instead of returning bufio.ErrTooLong.
+func TestScanForTyposLongLine(t *testing.T) {
+	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
+	// A line just over the default token limit — previously failed.
+	long := strings.Repeat("a", bufio.MaxScanTokenSize+10)
+	typos, err := scanForTypos(strings.NewReader(long), dict)
+	if err != nil {
+		t.Fatalf("scanForTypos failed on a long line: %v", err)
+	}
+	if len(typos) != 1 {
+		t.Errorf("expected 1 typo (the long non-dictionary word), got %d", len(typos))
+	}
+}
+
+// TestScanForTyposHugeLineFails verifies that lines exceeding the 1 MiB cap
+// still surface an error rather than being silently truncated.
+func TestScanForTyposHugeLineFails(t *testing.T) {
+	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}})
+	huge := strings.Repeat("a", scanBufferSize+10)
+	_, err := scanForTypos(strings.NewReader(huge), dict)
+	if err == nil {
+		t.Fatal("expected error for line exceeding scan buffer, got nil")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("expected ErrTooLong, got %v", err)
+	}
+}
+
 func TestRunConcurrentCheckerWorkerError(t *testing.T) {
 	mockDictionary := map[string]struct{}{"word": {}}
 	tempDir := t.TempDir()
 
-	longToken := strings.Repeat("a", bufio.MaxScanTokenSize+10)
-	if err := os.WriteFile(filepath.Join(tempDir, "long.txt"), []byte(longToken), 0644); err != nil {
+	// Use a line that exceeds the 1 MiB scan buffer so the worker errors.
+	hugeToken := strings.Repeat("a", scanBufferSize+10)
+	if err := os.WriteFile(filepath.Join(tempDir, "long.txt"), []byte(hugeToken), 0644); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
@@ -376,8 +414,46 @@ func TestRunConcurrentCheckerWorkerError(t *testing.T) {
 	if !errors.Is(err, bufio.ErrTooLong) {
 		t.Fatalf("expected ErrTooLong, got %v", err)
 	}
-	if result != nil {
-		t.Fatalf("expected nil result, got %v", result)
+	// After the aggregation fix, successful results are still returned (empty
+	// here because the only file failed) rather than nil.
+	if len(result) != 0 {
+		t.Fatalf("expected 0 results, got %d: %v", len(result), result)
+	}
+}
+
+// TestRunConcurrentCheckerAggregatesErrors verifies that when multiple files
+// fail, the combined error references every failure (not just the first) and
+// successful files still appear in the results map.
+func TestRunConcurrentCheckerAggregatesErrors(t *testing.T) {
+	mockDictionary := map[string]struct{}{"hello": {}, "world": {}}
+	tempDir := t.TempDir()
+
+	// Two files that will exceed the scan buffer and error.
+	hugeToken := strings.Repeat("x", scanBufferSize+10)
+	if err := os.WriteFile(filepath.Join(tempDir, "bad1.txt"), []byte(hugeToken), 0644); err != nil {
+		t.Fatalf("write bad1: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "bad2.txt"), []byte(hugeToken), 0644); err != nil {
+		t.Fatalf("write bad2: %v", err)
+	}
+	// One good file with a typo, so we can confirm successful results survive.
+	goodPath := filepath.Join(tempDir, "good.txt")
+	if err := os.WriteFile(goodPath, []byte("hello wrld\n"), 0644); err != nil {
+		t.Fatalf("write good: %v", err)
+	}
+
+	result, err := runConcurrentChecker(tempDir, mockDictionary, nil, false)
+	if err == nil {
+		t.Fatal("expected aggregated error, got nil")
+	}
+	// Both bad files should be referenced in the joined error message.
+	msg := err.Error()
+	if !strings.Contains(msg, "bad1.txt") || !strings.Contains(msg, "bad2.txt") {
+		t.Errorf("expected error to mention both bad files, got: %s", msg)
+	}
+	// The good file's typo should still be in the results.
+	if typos, ok := result[goodPath]; !ok || len(typos) != 1 {
+		t.Errorf("expected 1 typo in good.txt, got %v", result[goodPath])
 	}
 }
 
@@ -395,8 +471,10 @@ func TestCheckFileScannerError(t *testing.T) {
 	tempDir := t.TempDir()
 	filePath := filepath.Join(tempDir, "long.txt")
 
-	longToken := strings.Repeat("b", bufio.MaxScanTokenSize+10)
-	if err := os.WriteFile(filePath, []byte(longToken), 0644); err != nil {
+	// Use a line that exceeds the 1 MiB scan buffer so checkFile surfaces
+	// the scanner error rather than silently swallowing it.
+	hugeToken := strings.Repeat("b", scanBufferSize+10)
+	if err := os.WriteFile(filePath, []byte(hugeToken), 0644); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
