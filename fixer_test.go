@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -193,6 +194,37 @@ func TestWriteAtomic(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Errorf("expected 1 file in dir, got %d", len(entries))
+	}
+}
+
+// TestFixFilePreservesHugeLine verifies an over-long line (which the checker
+// skips entirely) is still written back byte-identically, while fixable typos
+// on normal lines are replaced.
+func TestFixFilePreservesHugeLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "doc.txt")
+	huge := strings.Repeat("x", maxLineLen+10)
+	original := "hello wrld\n" + huge + "\ndone wrld\n"
+	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	dict := map[string]struct{}{"hello": {}, "world": {}, "done": {}}
+	typos := detectTypos(t, path, dict)
+	if len(typos) != 2 {
+		t.Fatalf("expected 2 typos (huge line skipped), got %d: %v", len(typos), typos)
+	}
+
+	if _, err := fixFile(path, typos, false); err != nil {
+		t.Fatalf("fixFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := "hello world\n" + huge + "\ndone world\n"
+	if string(got) != want {
+		t.Errorf("huge line not preserved byte-identically:\ngot:  %q\nwant: %q", string(got), want)
 	}
 }
 

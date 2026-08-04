@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -102,16 +101,25 @@ func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error
 	defer in.Close()
 
 	var out strings.Builder
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	lineNumber := 0
-	for scanner.Scan() {
-		lineNumber++
-		out.WriteString(replaceLine(scanner.Text(), lineNumber, repl, &res))
+	// Iterate with the same lineReader and maxLineLen as scanForTypos so the
+	// fixer re-tokenizes exactly the lines the checker flagged, keeping line
+	// numbers aligned. Over-long lines (which the checker skips) are streamed
+	// into out verbatim so the rebuilt file is byte-identical.
+	lr := newLineReader(in, maxLineLen)
+	lr.setOverlong(&out)
+	for {
+		line, lineNumber, err := lr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return res, err
+		}
+		// lineReader returns the newline for complete lines; strip it so the
+		// rebuilt file keeps single terminators.
+		line = strings.TrimSuffix(line, "\n")
+		out.WriteString(replaceLine(line, lineNumber, repl, &res))
 		out.WriteByte('\n')
-	}
-	if err := scanner.Err(); err != nil {
-		return res, err
 	}
 
 	if dryRun || res.Fixes == 0 {
@@ -173,5 +181,14 @@ func writeAtomic(path, content string) error {
 	if info, err := os.Stat(path); err == nil {
 		_ = os.Chmod(tmpName, info.Mode())
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	// Best-effort directory sync so the rename itself is durable: on a sudden
+	// power loss the fsynced data could otherwise be lost with the rename.
+	if dirFile, err := os.Open(dir); err == nil {
+		_ = dirFile.Sync()
+		dirFile.Close()
+	}
+	return nil
 }

@@ -1,10 +1,12 @@
 package main
 
 import (
-	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestConfigValidate covers the edge cases of Config.Validate: every valid
@@ -126,5 +128,103 @@ fix: false
 	}
 	if cfg.Fix {
 		t.Error("Fix should be false")
+	}
+}
+
+// quietRun runs the CLI with output redirected to temp files so tests don't
+// pollute the test log, and returns the exit code.
+func quietRun(t *testing.T, args ...string) int {
+	t.Helper()
+	origOut, origErr := os.Stdout, os.Stderr
+	outF, err := os.CreateTemp(t.TempDir(), "stdout-")
+	if err != nil {
+		t.Fatalf("temp stdout: %v", err)
+	}
+	errF, err := os.CreateTemp(t.TempDir(), "stderr-")
+	if err != nil {
+		t.Fatalf("temp stderr: %v", err)
+	}
+	os.Stdout, os.Stderr = outF, errF
+	defer func() {
+		os.Stdout, os.Stderr = origOut, origErr
+		outF.Close()
+		errF.Close()
+	}()
+	return run(args)
+}
+
+// writeDict writes a tiny CSV dictionary (header + words) for fast run() tests.
+func writeDict(t *testing.T, words ...string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "dict.csv")
+	var sb strings.Builder
+	sb.WriteString("word\n")
+	for _, w := range words {
+		sb.WriteString(w + "\n")
+	}
+	if err := os.WriteFile(f, []byte(sb.String()), 0644); err != nil {
+		t.Fatalf("write dict: %v", err)
+	}
+	return f
+}
+
+// TestRunExitCodes verifies the CLI exit contract end to end: clean = 0,
+// typos found = 1.
+func TestRunExitCodes(t *testing.T) {
+	dict := writeDict(t, "hello", "world")
+	dir := t.TempDir()
+	clean := filepath.Join(dir, "clean.txt")
+	if err := os.WriteFile(clean, []byte("hello world\n"), 0644); err != nil {
+		t.Fatalf("write clean: %v", err)
+	}
+	typo := filepath.Join(dir, "typo.txt")
+	if err := os.WriteFile(typo, []byte("hello wrld\n"), 0644); err != nil {
+		t.Fatalf("write typo: %v", err)
+	}
+
+	if code := quietRun(t, "--dict", dict, clean); code != exitOK {
+		t.Errorf("clean file: got exit %d, want %d", code, exitOK)
+	}
+	if code := quietRun(t, "--dict", dict, typo); code != exitTypos {
+		t.Errorf("typo file: got exit %d, want %d", code, exitTypos)
+	}
+}
+
+// TestRunUsageErrors verifies config/usage mistakes exit with 2 (error), not 1.
+func TestRunUsageErrors(t *testing.T) {
+	dict := writeDict(t, "hello")
+
+	if code := quietRun(t, "--dict", dict); code != exitError {
+		t.Errorf("no path: got exit %d, want %d", code, exitError)
+	}
+	if code := quietRun(t, "--dict", dict, "a.txt", "b.txt"); code != exitError {
+		t.Errorf("two paths: got exit %d, want %d", code, exitError)
+	}
+	if code := quietRun(t, "--bogus-flag"); code != exitError {
+		t.Errorf("unknown flag: got exit %d, want %d", code, exitError)
+	}
+	if code := quietRun(t, "--dry-run", "a.txt"); code != exitError {
+		t.Errorf("dry-run without fix: got exit %d, want %d", code, exitError)
+	}
+}
+
+// TestRunFixMode verifies --fix rewrites the top suggestion and exits 0 when
+// nothing is skipped.
+func TestRunFixMode(t *testing.T) {
+	dict := writeDict(t, "hello", "world")
+	path := filepath.Join(t.TempDir(), "doc.txt")
+	if err := os.WriteFile(path, []byte("hello wrld\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if code := quietRun(t, "--dict", dict, "--fix", path); code != exitOK {
+		t.Fatalf("fix: got exit %d, want %d", code, exitOK)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "hello world\n" {
+		t.Errorf("unexpected fixed content: %q", string(got))
 	}
 }

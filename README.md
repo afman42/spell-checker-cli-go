@@ -8,13 +8,20 @@ typos with ranked "did you mean?" suggestions.
 
 - **Fast** — checks files concurrently across all CPU cores.
 - **Flexible** — works on files, directories, stdin, or watch mode.
-- **Helpful** — ranked suggestions, colored terminal output, live progress bar.
+- **Helpful** — smart ranked suggestions (transposition-aware, prefix-aware),
+  colored terminal output, live progress bar.
 - **Unicode-aware** — handles accents (café), contractions (don't, it's),
   hyphenated words (state-of-the-art).
 - **Multiple outputs** — plain text with colors, responsive dark-mode HTML, or machine-readable JSON.
 - **Auto-fix** — `--fix` rewrites each typo to its top suggestion in place (with `--dry-run`).
 - **Watch mode** — `fsnotify` re-checks files automatically as you save.
-- **CI-friendly** — deterministic output, machine-readable JSON, and exit code 1 when typos are found or remain unfixed.
+- **Fast startup** — the suggestion index is built once, then persisted on disk
+  and reused across runs (invalidation is automatic on dictionary change).
+- **Prose-focused** — identifier fragments (`Mi03x_er`), binary files, and
+  dependency trees (`.git`, `node_modules`, …) are skipped by default.
+- **CI-friendly** — deterministic output, machine-readable JSON, and distinct
+  exit codes: `1` when typos are found or remain unfixed, `2` when the tool
+  cannot run.
 
 ---
 
@@ -85,12 +92,19 @@ stripped, so `build/` and `build` behave identically. Use `*` wildcards freely:
 To skip a directory's contents, exclude the directory itself — `filepath.Walk`
 applies `SkipDir` so the whole subtree is pruned.
 
+A set of **built-in excludes is always active**, even with no `--exclude`: VCS
+metadata (`.git`, `.hg`, `.svn`), dependency stores (`node_modules`,
+`bower_components`, `vendor`), virtualenvs (`.venv`, `venv`, `virtualenv`), and
+common tool caches (`.cache`, `.gradle`, `.cargo`, `__pycache__`,
+`.pytest_cache`, `.mypy_cache`, `.tox`, `.next`, `.idea`, `.vscode`, and more).
+These are merged with — not overridden by — anything you pass via `--exclude`.
+
 #### Line length limit
 
 Lines up to **1 MiB** are scanned normally. Longer lines (e.g. heavily minified
-files) trigger a `bufio.ErrTooLong` error for that file rather than being
-silently truncated; the file is reported as errored and other files in the run
-still complete normally.
+files) are skipped — their content is not checked — but the line is still
+counted so every following line keeps its correct number, and the rest of the
+file is scanned normally. A single pathological line never fails the file.
 
 ### Examples
 
@@ -168,7 +182,7 @@ world,,The earth
 Typos found (2 total):
 
 --- In file notes.txt ---
-- Line 2, Col 5: "wrld" appears to be a typo. Did you mean: wald, weld, wild, wold, world?
+- Line 2, Col 5: "wrld" appears to be a typo. Did you mean: world, wald, weld, wild, wold?
 ```
 
 - In a terminal, typos are **red** and suggestions **green**.
@@ -185,10 +199,12 @@ Typos found (2 total):
 | `--fix` applied and **every** typo was correctable | `0` |
 | `--fix` applied but some typos had no suggestion and were skipped | `1` |
 | `--fix --dry-run` with typos present | `1` |
-| Fatal error (config, dictionary load, file access) | `1` |
+| Fatal error (bad usage, unknown flag, config/dictionary load failure) | `2` |
 
-The "skipped typos still fail CI" rule is intentional: uncorrected typos remain
-in the files, so CI should surface them for manual review rather than silently pass.
+`1` means "spelling problems exist", `2` means "couldn't run at all", so CI can
+tell the difference between a lint failure and a tooling failure. The "skipped
+typos still fail CI" rule is intentional: uncorrected typos remain in the
+files, so CI should surface them for manual review rather than silently pass.
 
 #### JSON output
 
@@ -207,7 +223,7 @@ diagnostic messages go to stderr, so stdout is clean and pipeable:
       "file": "notes.txt",
       "typos": [
         { "word": "wrld", "line": 2, "column": 5,
-          "suggestions": ["wald", "weld", "wild", "wold", "world"] }
+          "suggestions": ["world", "wald", "weld", "wild", "wold"] }
       ]
     }
   ]
@@ -234,9 +250,10 @@ crash never leaves a half-written file.
   so CI surfaces them for review.
 - Fix mode does not read from stdin.
 
-> **Note:** the "top suggestion" is ranked by edit distance, then alphabetically —
-> so `wrld` becomes `wald`, not `world`. Review changes (or use `--dry-run`)
-> before committing automated fixes.
+> **Note:** suggestions are ranked by edit distance, then by transposition
+> matches (`teh` → `the`), letter ordering, and shared prefix — so `worl` becomes
+> `world`, not `whorl`. Ranking is still heuristic, so review changes (or use
+> `--dry-run`) before committing automated fixes.
 
 ---
 
@@ -291,9 +308,10 @@ git commit --no-verify
 
 ```
 ├── main.go              Entry point, config, output routing
-├── checker.go           Scanner, concurrent worker pool, word tokenizer
+├── checker.go           Scanner, concurrent worker pool, word tokenizer, binary detection
 ├── dictionary.go        Dictionary loading (zstd-compressed embedded dict)
 ├── suggestions.go       BK-tree + Levenshtein distance for suggestions
+├── tree_cache.go        On-disk persistence of the built suggestion tree
 ├── reporter.go          Text, HTML, and JSON output generation
 ├── style.css            Embedded stylesheet for HTML reports (//go:embed)
 ├── fixer.go             Auto-fix mode (--fix / --dry-run), atomic writes
@@ -303,6 +321,7 @@ git commit --no-verify
 ├── checker_test.go          Scanner, tokenizer, and file-collection tests
 ├── dictionary_test.go       Dictionary parsing/loading tests
 ├── suggestions_test.go      BK-tree + Levenshtein suggestion tests
+├── tree_cache_test.go       Suggestion-tree cache round-trip tests
 ├── reporter_test.go         Text/HTML report + relLink path tests
 ├── json_report_test.go      JSON report shape and escaping tests
 ├── fixer_test.go            Auto-fix and atomic-write tests
@@ -321,12 +340,14 @@ git commit --no-verify
 | Component | What it does |
 |-----------|-------------|
 | **Worker pool** | Files are checked in parallel, one goroutine per CPU core; multiple file errors are aggregated and reported together |
-| **Word tokenizer** | Unicode-aware regex (`\p{L}+`) for accents, contractions, hyphens; lines up to 1 MiB |
+| **Word tokenizer** | Unicode-aware regex (`\p{L}+`) for accents, contractions, hyphens; lines up to 1 MiB; identifier fragments next to digits/underscores are skipped; over-long lines are skipped without failing the file |
 | **Dictionary** | Zstd-compressed word list embedded at compile time; O(1) hash-set lookup |
-| **Suggestions** | BK-tree for O(log n) fuzzy search; Levenshtein edit distance ≤ 2 |
-| **Binary detection** | Files with null bytes in the first 512 bytes are skipped |
+| **Suggestions** | BK-tree for O(log n) fuzzy search; Levenshtein edit distance ≤ 2; ranking is transposition- and prefix-aware |
+| **Startup cache** | The built suggestion tree is persisted to the user cache directory (keyed and versioned) and loaded on later runs — first-typo startup drops from seconds to <1s |
+| **Binary detection** | Extensions (`.pdf`, images, archives, fonts, …) plus NUL/control-byte sniffing in the first 512 bytes are skipped |
+| **Default excludes** | `.git`, `node_modules`, `vendor`, venvs, and tool caches are always skipped; `--exclude` patterns merge on top |
 | **Watch mode** | `fsnotify` watches directories, debounces rapid save events (200 ms) |
-| **Atomic writes** | `--fix` writes a temp file, `fsync`s it, then renames over the target — crash-safe and permission-preserving |
+| **Atomic writes** | `--fix` writes a temp file, `fsync`s it, renames over the target, then syncs the directory — crash-safe and permission-preserving |
 
 ---
 

@@ -102,7 +102,7 @@ func TestRankSuggestionsOrderingAndCap(t *testing.T) {
 		{"foxtrot", 2},
 		{"golf", 2},
 	}
-	got := rankSuggestions(scored)
+	got := rankSuggestions(scored, "")
 
 	// distance 0: charlie; distance 1: alpha, bravo; distance 2: delta, echo, foxtrot, golf
 	// capped at 5 -> charlie, alpha, bravo, delta, echo
@@ -115,10 +115,64 @@ func TestRankSuggestionsOrderingAndCap(t *testing.T) {
 	}
 }
 
+// TestOsaDistance verifies adjacent transpositions cost one edit, unlike plain
+// Levenshtein.
+func TestOsaDistance(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"teh", "the", 1},         // adjacent transposition
+		{"recieve", "receive", 1}, // transposed 'ie'/'ei'
+		{"helo", "hello", 1},      // insertion
+		{"wrld", "world", 1},
+		{"hello", "hello", 0},
+		{"cat", "dog", 3},
+	}
+	for _, tc := range cases {
+		if got := osaDistance(tc.a, tc.b); got != tc.want {
+			t.Errorf("osaDistance(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// TestRankSuggestionsTransposition verifies a transposition-1 suggestion beats
+// equally-distant (in Levenshtein terms) alternatives.
+func TestRankSuggestionsTransposition(t *testing.T) {
+	scored := []scoredWord{
+		{"tea", 1},  // substitution, lev distance 1
+		{"tee", 1},  // substitution, lev distance 1
+		{"the", 2},  // transposition: lev 2, but effective distance 1
+		{"then", 2}, // transposition + insertion
+	}
+	got := rankSuggestions(scored, "teh")
+	if got[0] != "the" {
+		t.Errorf("expected 'the' first for typo 'teh', got %v", got)
+	}
+}
+
 // TestRankSuggestionsEmpty verifies empty input yields an empty (non-panicking) result.
 func TestRankSuggestionsEmpty(t *testing.T) {
-	if got := rankSuggestions(nil); len(got) != 0 {
+	if got := rankSuggestions(nil, ""); len(got) != 0 {
 		t.Errorf("expected empty result, got %v", got)
+	}
+}
+
+// TestRankSuggestionsTypoAware verifies that at equal edit distance, suggestions
+// whose letters follow the typo's order, then share its prefix, are ranked above
+// alphabetically-earlier-but-structurally-worse words.
+func TestRankSuggestionsTypoAware(t *testing.T) {
+	scored := []scoredWord{
+		{"wald", 1},  // no 'l' after 'o' — not a subsequence
+		{"whorl", 1}, // subsequence, shares only "w"
+		{"world", 1}, // subsequence + 4-char shared prefix
+		{"worn", 1},  // shares "wor" prefix but not a subsequence
+	}
+	got := rankSuggestions(scored, "worl")
+	// distance ties → subsequence matches first (world, whorl), then the rest.
+	want := []string{"world", "whorl", "worn", "wald"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rankSuggestions() = %v, want %v", got, want)
 	}
 }
 
@@ -134,11 +188,14 @@ func TestSuggestUsesBKTreeForLargeDict(t *testing.T) {
 	dict["word"] = struct{}{}
 
 	cd := NewConcurrentDictionary(dict)
-	if cd.bkTree == nil {
-		t.Fatal("expected BK-tree to be built for large dictionary")
+	if cd.bkTree != nil {
+		t.Fatal("expected BK-tree to be built lazily, was pre-built")
 	}
 
 	got := cd.Suggest("wrold")
+	if cd.bkTree == nil {
+		t.Fatal("expected BK-tree to be built after first Suggest call")
+	}
 	found := false
 	for _, s := range got {
 		if s == "world" {

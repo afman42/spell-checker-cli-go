@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -383,36 +385,93 @@ func TestScanForTyposLongLine(t *testing.T) {
 	}
 }
 
-// TestScanForTyposHugeLineFails verifies that lines exceeding the 1 MiB cap
-// still surface an error rather than being silently truncated.
-func TestScanForTyposHugeLineFails(t *testing.T) {
+// TestScanForTyposHugeLineSkipped verifies that lines exceeding the 1 MiB cap
+// are skipped (content not checked) instead of failing the scan, and the
+// following line still gets its correct line number.
+func TestScanForTyposHugeLineSkipped(t *testing.T) {
 	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}})
-	huge := strings.Repeat("a", scanBufferSize+10)
-	_, err := scanForTypos(strings.NewReader(huge), dict)
-	if err == nil {
-		t.Fatal("expected error for line exceeding scan buffer, got nil")
+	huge := strings.Repeat("a", maxLineLen+10) + "\nwrold\nother\n"
+	typos, err := scanForTypos(strings.NewReader(huge), dict)
+	if err != nil {
+		t.Fatalf("scanForTypos: unexpected error, got %v", err)
 	}
-	if !errors.Is(err, bufio.ErrTooLong) {
-		t.Fatalf("expected ErrTooLong, got %v", err)
+	if len(typos) != 2 {
+		t.Fatalf("expected 2 typos on the following lines, got %d: %v", len(typos), typos)
+	}
+	if typos[0].LineNumber != 2 || typos[1].LineNumber != 3 {
+		t.Errorf("expected typos on lines 2 and 3, got %d and %d", typos[0].LineNumber, typos[1].LineNumber)
+	}
+}
+
+// TestLineReaderBasics verifies line iteration and line numbers on a simple input.
+func TestLineReaderBasics(t *testing.T) {
+	lr := newLineReader(strings.NewReader("one\ntwo\n"), maxLineLen)
+	line, num, err := lr.Next()
+	if err != nil || line != "one\n" || num != 1 {
+		t.Fatalf("got (%q,%d,%v), want (\"one\\n\",1,nil)", line, num, err)
+	}
+	line, num, err = lr.Next()
+	if err != nil || line != "two\n" || num != 2 {
+		t.Fatalf("got (%q,%d,%v), want (\"two\\n\",2,nil)", line, num, err)
+	}
+	if _, _, err := lr.Next(); err != io.EOF {
+		t.Fatalf("expected EOF, got %v", err)
+	}
+}
+
+// TestLineReaderNoTrailingNewline verifies the final unterminated line is returned.
+func TestLineReaderNoTrailingNewline(t *testing.T) {
+	lr := newLineReader(strings.NewReader("abc"), maxLineLen)
+	line, num, err := lr.Next()
+	if err != nil || line != "abc" || num != 1 {
+		t.Fatalf("got (%q,%d,%v), want (\"abc\",1,nil)", line, num, err)
+	}
+	if _, _, err := lr.Next(); err != io.EOF {
+		t.Fatalf("expected EOF, got %v", err)
+	}
+}
+
+// TestLineReaderOverlongSkippedButPreserved verifies over-long lines are not
+// returned as checkable lines, the following line keeps its true number, and an
+// installed overlong sink still receives the full content verbatim.
+func TestLineReaderOverlongSkippedButPreserved(t *testing.T) {
+	huge := strings.Repeat("q", maxLineLen+10)
+	lr := newLineReader(strings.NewReader("ok\n"+huge+"\nend\n"), maxLineLen)
+	var preserved strings.Builder
+	lr.setOverlong(&preserved)
+
+	line, num, err := lr.Next()
+	if err != nil || line != "ok\n" || num != 1 {
+		t.Fatalf("got (%q,%d,%v), want (\"ok\\n\",1,nil)", line, num, err)
+	}
+	line, num, err = lr.Next()
+	if err != nil || line != "end\n" || num != 3 {
+		t.Fatalf("got (%q,%d,%v), want (\"end\\n\",3,nil)", line, num, err)
+	}
+	if preserved.String() != huge+"\n" {
+		t.Error("overlong content not preserved verbatim")
 	}
 }
 
 func TestRunConcurrentCheckerWorkerError(t *testing.T) {
 	mockDictionary := map[string]struct{}{"word": {}}
 	tempDir := t.TempDir()
-
-	// Use a line that exceeds the 1 MiB scan buffer so the worker errors.
-	hugeToken := strings.Repeat("a", scanBufferSize+10)
-	if err := os.WriteFile(filepath.Join(tempDir, "long.txt"), []byte(hugeToken), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tempDir, "a.txt"), []byte("hello\n"), 0644); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
+
+	orig := checkFileFunc
+	checkFileFunc = func(_ string, _ *ConcurrentDictionary) ([]MisspelledWord, error) {
+		return nil, errors.New("injected worker failure")
+	}
+	defer func() { checkFileFunc = orig }()
 
 	result, err := runConcurrentChecker(tempDir, mockDictionary, nil, false)
 	if err == nil {
 		t.Fatal("expected error from runConcurrentChecker, got nil")
 	}
-	if !errors.Is(err, bufio.ErrTooLong) {
-		t.Fatalf("expected ErrTooLong, got %v", err)
+	if !strings.Contains(err.Error(), "injected worker failure") {
+		t.Fatalf("expected injected failure in error, got %v", err)
 	}
 	// After the aggregation fix, successful results are still returned (empty
 	// here because the only file failed) rather than nil.
@@ -428,19 +487,27 @@ func TestRunConcurrentCheckerAggregatesErrors(t *testing.T) {
 	mockDictionary := map[string]struct{}{"hello": {}, "world": {}}
 	tempDir := t.TempDir()
 
-	// Two files that will exceed the scan buffer and error.
-	hugeToken := strings.Repeat("x", scanBufferSize+10)
-	if err := os.WriteFile(filepath.Join(tempDir, "bad1.txt"), []byte(hugeToken), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tempDir, "bad1.txt"), []byte("x\n"), 0644); err != nil {
 		t.Fatalf("write bad1: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(tempDir, "bad2.txt"), []byte(hugeToken), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tempDir, "bad2.txt"), []byte("x\n"), 0644); err != nil {
 		t.Fatalf("write bad2: %v", err)
 	}
-	// One good file with a typo, so we can confirm successful results survive.
 	goodPath := filepath.Join(tempDir, "good.txt")
 	if err := os.WriteFile(goodPath, []byte("hello wrld\n"), 0644); err != nil {
 		t.Fatalf("write good: %v", err)
 	}
+
+	orig := checkFileFunc
+	checkFileFunc = func(path string, dict *ConcurrentDictionary) ([]MisspelledWord, error) {
+		switch filepath.Base(path) {
+		case "bad1.txt", "bad2.txt":
+			return nil, fmt.Errorf("injected failure in %s", filepath.Base(path))
+		default:
+			return checkFile(path, dict)
+		}
+	}
+	defer func() { checkFileFunc = orig }()
 
 	result, err := runConcurrentChecker(tempDir, mockDictionary, nil, false)
 	if err == nil {
@@ -466,25 +533,25 @@ func TestRunConcurrentCheckerWalkError(t *testing.T) {
 	}
 }
 
-func TestCheckFileScannerError(t *testing.T) {
+// TestCheckFileSkippedHugeLine verifies checkFile tolerates a file whose only
+// line exceeds the 1 MiB cap: the line is skipped rather than failing the file.
+func TestCheckFileSkippedHugeLine(t *testing.T) {
 	mockDictionary := map[string]struct{}{"word": {}}
 	tempDir := t.TempDir()
 	filePath := filepath.Join(tempDir, "long.txt")
 
-	// Use a line that exceeds the 1 MiB scan buffer so checkFile surfaces
-	// the scanner error rather than silently swallowing it.
-	hugeToken := strings.Repeat("b", scanBufferSize+10)
+	hugeToken := strings.Repeat("b", maxLineLen+10)
 	if err := os.WriteFile(filePath, []byte(hugeToken), 0644); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
 	concurrentDict := NewConcurrentDictionary(mockDictionary)
-	_, err := checkFile(filePath, concurrentDict)
-	if err == nil {
-		t.Fatal("expected scanner error, got nil")
+	typos, err := checkFile(filePath, concurrentDict)
+	if err != nil {
+		t.Fatalf("expected no error for over-long line, got %v", err)
 	}
-	if !errors.Is(err, bufio.ErrTooLong) {
-		t.Fatalf("expected ErrTooLong, got %v", err)
+	if len(typos) != 0 {
+		t.Fatalf("expected 0 typos, got %v", typos)
 	}
 }
 
@@ -492,5 +559,72 @@ func TestIsLikelyBinaryReadError(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := isLikelyBinary(dir); err == nil {
 		t.Fatal("expected error when checking directory")
+	}
+}
+
+// TestScanForTyposSkipsIdentifierFragments verifies tokens split out of
+// identifiers (adjacent to a digit or underscore) are not reported.
+func TestScanForTyposSkipsIdentifierFragments(t *testing.T) {
+	dict := NewConcurrentDictionary(map[string]struct{}{})
+	// Mi03x_er -> Mi/x/er, 10px -> px, 3D -> D are identifiers/units; the two
+	// spaced words are real prose (and misspelled relative to the empty dict).
+	typos, err := scanForTypos(strings.NewReader("Mi03x_er 10px 3D hello wolrd\n"), dict)
+	if err != nil {
+		t.Fatalf("scanForTypos: %v", err)
+	}
+	if len(typos) != 2 {
+		t.Fatalf("expected 2 typos (identifier fragments skipped), got %d: %v", len(typos), typos)
+	}
+	if typos[0].Word != "hello" || typos[1].Word != "wolrd" {
+		t.Errorf("unexpected typos: %v", typos)
+	}
+}
+
+// TestIsLikelyBinaryByExtension verifies known-binary extensions are skipped
+// even when their content looks like text.
+func TestIsLikelyBinaryByExtension(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "doc.pdf")
+	if err := os.WriteFile(p, []byte("%PDF-1.4\nplain-looking text, no null bytes\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := isLikelyBinary(p)
+	if err != nil {
+		t.Fatalf("isLikelyBinary: %v", err)
+	}
+	if !got {
+		t.Error("expected .pdf to be treated as binary")
+	}
+}
+
+// TestCollectFilesDefaultExcludes verifies built-in excludes (.git, dependency
+// stores, caches) are skipped even when the user passes no --exclude.
+func TestCollectFilesDefaultExcludes(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, content string) {
+		t.Helper()
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write("node_modules/pkg/index.js", "var x = 1;\n")
+	write(".git/config", "[core]\n")
+	write("docs/readme.txt", "hello world\n")
+	write("note.txt", "hi there\n")
+
+	files, err := collectFiles(dir, nil, false)
+	if err != nil {
+		t.Fatalf("collectFiles: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files (node_modules and .git skipped), got %v", files)
+	}
+	for _, f := range files {
+		if strings.Contains(f, "node_modules") || strings.Contains(filepath.Base(f), ".git") {
+			t.Errorf("default exclude leaked: %s", f)
+		}
 	}
 }

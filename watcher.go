@@ -67,6 +67,7 @@ func runWatcher(rootPath string, dictionary map[string]struct{}, excludePatterns
 }
 
 func addDirsToWatcher(watcher *fsnotify.Watcher, rootPath string, excludePatterns []string) error {
+	patterns := mergeDefaultExcludes(excludePatterns)
 	return filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -74,7 +75,7 @@ func addDirsToWatcher(watcher *fsnotify.Watcher, rootPath string, excludePattern
 		if !info.IsDir() {
 			return nil
 		}
-		excluded, err := shouldExclude(path, excludePatterns)
+		excluded, err := shouldExclude(path, patterns)
 		if err != nil {
 			return err
 		}
@@ -87,28 +88,35 @@ func addDirsToWatcher(watcher *fsnotify.Watcher, rootPath string, excludePattern
 
 func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh chan<- string, excludePatterns []string) {
 	// Editors save in many ways: direct writes, or write-temp-then-rename
-	// (atomic save). Cover Write, Create, and Rename so we don't miss saves.
-	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+	// (atomic save). Cover Write, Create, Rename, and Remove so saves and
+	// deletions are handled and stale watches don't leak.
+	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
 		return
 	}
 
 	info, err := os.Stat(event.Name)
 	if err != nil {
-		// File may have been removed or is mid-rename; nothing to check.
+		// Removed or renamed away; drop any stale watch on it, then nothing
+		// left to check.
+		_ = watcher.Remove(event.Name)
 		return
 	}
 
+	patterns := mergeDefaultExcludes(excludePatterns)
+
 	// A new directory: watch it (and any subtree it already contains).
 	if info.IsDir() {
-		excluded, err := shouldExclude(event.Name, excludePatterns)
+		excluded, err := shouldExclude(event.Name, patterns)
 		if err == nil && !excluded {
-			_ = addDirsToWatcher(watcher, event.Name, excludePatterns)
+			if err := addDirsToWatcher(watcher, event.Name, patterns); err != nil {
+				fmt.Fprintf(os.Stderr, "Error watching new directory %s: %v\n", event.Name, err)
+			}
 		}
 		return
 	}
 
 	// Respect exclude patterns
-	excluded, err := shouldExclude(event.Name, excludePatterns)
+	excluded, err := shouldExclude(event.Name, patterns)
 	if err != nil || excluded {
 		return
 	}
