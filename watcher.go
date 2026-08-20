@@ -28,7 +28,9 @@ func runWatcher(rootPath string, dictionary map[string]struct{}, excludePatterns
 	if len(allTypos) == 0 {
 		fmt.Println("  No typos found.")
 	} else {
-		generateTextReport(os.Stdout, allTypos)
+		if err := generateTextReport(os.Stdout, allTypos); err != nil {
+			fmt.Fprintf(os.Stderr, "Error generating report: %v\n", err)
+		}
 		fmt.Printf("\n%d file(s) have typos.\n", len(allTypos))
 	}
 

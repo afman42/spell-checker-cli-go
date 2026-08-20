@@ -156,17 +156,18 @@ func generateIndexFile(outputDir string, entries []fileEntry, results map[string
 		return fmt.Errorf("could not create index file: %w", err)
 	}
 	defer file.Close()
+	w := &errWriter{w: file}
 
 	totalFiles, totalTypos, totalSuggestions := summarizeStats(results)
 
-	fmt.Fprint(file, htmlDocType)
-	writeMetaHeader(file, "Spell Check Summary")
-	writeStatsBar(file, totalFiles, totalTypos, totalSuggestions)
+	fmt.Fprint(w, htmlDocType)
+	writeMetaHeader(w, "Spell Check Summary")
+	writeStatsBar(w, totalFiles, totalTypos, totalSuggestions)
 
 	if len(entries) == 0 {
-		fmt.Fprint(file, `<div class="empty-state"><div class="icon">✅</div><p>No typos found.</p></div>`)
+		fmt.Fprint(w, `<div class="empty-state"><div class="icon">✅</div><p>No typos found.</p></div>`)
 	} else {
-		fmt.Fprint(file, `<ul class="file-list">`)
+		fmt.Fprint(w, `<ul class="file-list">`)
 		for _, entry := range entries {
 			count := len(entry.words)
 			var label, clsLabel string
@@ -180,14 +181,14 @@ func generateIndexFile(outputDir string, entries []fileEntry, results map[string
 				label = "clean"
 				clsLabel = "clean"
 			}
-			fmt.Fprintf(file, `<li class="file-item"><a href="%s">%s</a> <span class="typo-count %s">%s</span></li>`,
+			fmt.Fprintf(w, `<li class="file-item"><a href="%s">%s</a> <span class="typo-count %s">%s</span></li>`,
 				html.EscapeString(entry.filename), html.EscapeString(entry.path), clsLabel, label)
 		}
-		fmt.Fprint(file, `</ul>`)
+		fmt.Fprint(w, `</ul>`)
 	}
 
-	fmt.Fprint(file, htmlFooter)
-	return nil
+	fmt.Fprint(w, htmlFooter)
+	return w.err
 }
 
 // generateSingleReportFile creates a detailed HTML report for one source file.
@@ -201,16 +202,17 @@ func generateSingleReportFile(outputDir, filename, filePath string, words []Miss
 		return fmt.Errorf("could not create report file for %s: %w", filePath, err)
 	}
 	defer file.Close()
+	w := &errWriter{w: file}
 
-	fmt.Fprint(file, htmlDocType)
+	fmt.Fprint(w, htmlDocType)
 
 	// Back to index link — compute correct relative path from subdirectories
 	backLink := relLink(filename, "index.html")
-	fmt.Fprintf(file, `<a class="nav-link" href="%s">← Back to Summary</a>`, html.EscapeString(backLink))
+	fmt.Fprintf(w, `<a class="nav-link" href="%s">← Back to Summary</a>`, html.EscapeString(backLink))
 
 	// Heading
-	fmt.Fprintf(file, `<h1>%s</h1>`, html.EscapeString(filePath))
-	fmt.Fprintf(file, `<div class="meta">%d typo(s) found</div>`, len(words))
+	fmt.Fprintf(w, `<h1>%s</h1>`, html.EscapeString(filePath))
+	fmt.Fprintf(w, `<div class="meta">%d typo(s) found</div>`, len(words))
 
 	// Navigation between files
 	if len(allEntries) > 1 {
@@ -229,25 +231,25 @@ func generateSingleReportFile(outputDir, filename, filePath string, words []Miss
 			}
 		}
 		if prevLink != "" || nextLink != "" {
-			fmt.Fprintf(file, `<div style="display:flex;gap:16px;margin-bottom:8px">%s %s</div>`, prevLink, nextLink)
+			fmt.Fprintf(w, `<div style="display:flex;gap:16px;margin-bottom:8px">%s %s</div>`, prevLink, nextLink)
 		}
 	}
 
 	// Table
 	if len(words) > 0 {
-		fmt.Fprint(file, `<table><tr><th>Line</th><th>Col</th><th>Word</th><th>Suggestions</th></tr>`)
+		fmt.Fprint(w, `<table><tr><th>Line</th><th>Col</th><th>Word</th><th>Suggestions</th></tr>`)
 		for _, m := range words {
 			suggestionsStr := strings.Join(m.Suggestions, ", ")
-			fmt.Fprintf(file, `<tr><td class="line">%d</td><td class="col">%d</td><td class="word">%s</td><td class="suggestions">%s</td></tr>`,
+			fmt.Fprintf(w, `<tr><td class="line">%d</td><td class="col">%d</td><td class="word">%s</td><td class="suggestions">%s</td></tr>`,
 				m.LineNumber, m.Column, html.EscapeString(m.Word), html.EscapeString(suggestionsStr))
 		}
-		fmt.Fprint(file, `</table>`)
+		fmt.Fprint(w, `</table>`)
 	} else {
-		fmt.Fprint(file, `<div class="empty-state"><div class="icon">✅</div><p>No typos found in this file.</p></div>`)
+		fmt.Fprint(w, `<div class="empty-state"><div class="icon">✅</div><p>No typos found in this file.</p></div>`)
 	}
 
-	fmt.Fprint(file, htmlFooter)
-	return nil
+	fmt.Fprint(w, htmlFooter)
+	return w.err
 }
 
 // relLink computes a relative URL from the current report filename to a target
@@ -265,44 +267,58 @@ func relLink(current, target string) string {
 
 // --- Single-file HTML report ---
 
-func generateHTMLReport(writer io.Writer, results map[string][]MisspelledWord) {
+func generateHTMLReport(writer io.Writer, results map[string][]MisspelledWord) error {
+	w := &errWriter{w: writer}
 	totalFiles, totalTypos, totalSuggestions := summarizeStats(results)
 
-	fmt.Fprint(writer, htmlDocType)
-	writeMetaHeader(writer, "Spell Check Report")
-	writeStatsBar(writer, totalFiles, totalTypos, totalSuggestions)
+	fmt.Fprint(w, htmlDocType)
+	writeMetaHeader(w, "Spell Check Report")
+	writeStatsBar(w, totalFiles, totalTypos, totalSuggestions)
 
 	if len(results) == 0 {
-		fmt.Fprint(writer, `<div class="empty-state"><div class="icon">✅</div><p>No typos found.</p></div>`)
+		fmt.Fprint(w, `<div class="empty-state"><div class="icon">✅</div><p>No typos found.</p></div>`)
 	} else {
-		// Sort file paths for consistent output
-		paths := make([]string, 0, len(results))
-		for p := range results {
-			paths = append(paths, p)
-		}
-		sort.Strings(paths)
-
+		paths := sortedResultPaths(results)
 		for _, file := range paths {
 			words := results[file]
-			fmt.Fprintf(writer, `<h2>%s</h2>`, html.EscapeString(file))
+			fmt.Fprintf(w, `<h2>%s</h2>`, html.EscapeString(file))
 			if len(words) > 0 {
-				fmt.Fprint(writer, `<table><tr><th>Line</th><th>Col</th><th>Word</th><th>Suggestions</th></tr>`)
+				fmt.Fprint(w, `<table><tr><th>Line</th><th>Col</th><th>Word</th><th>Suggestions</th></tr>`)
 				for _, m := range words {
 					suggestionsStr := strings.Join(m.Suggestions, ", ")
-					fmt.Fprintf(writer, `<tr><td class="line">%d</td><td class="col">%d</td><td class="word">%s</td><td class="suggestions">%s</td></tr>`,
+					fmt.Fprintf(w, `<tr><td class="line">%d</td><td class="col">%d</td><td class="word">%s</td><td class="suggestions">%s</td></tr>`,
 						m.LineNumber, m.Column, html.EscapeString(m.Word), html.EscapeString(suggestionsStr))
 				}
-				fmt.Fprint(writer, `</table>`)
+				fmt.Fprint(w, `</table>`)
 			} else {
-				fmt.Fprint(writer, `<p>No typos found.</p>`)
+				fmt.Fprint(w, `<p>No typos found.</p>`)
 			}
 		}
 	}
 
-	fmt.Fprint(writer, htmlFooter)
+	fmt.Fprint(w, htmlFooter)
+	return w.err
 }
 
 // --- Shared helpers for HTML generation ---
+
+// errWriter records the first write error so report generators can return it
+// instead of silently dropping output (disk full, closed pipe, ...).
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (ew *errWriter) Write(p []byte) (int, error) {
+	if ew.err != nil {
+		return 0, ew.err
+	}
+	n, err := ew.w.Write(p)
+	if err != nil {
+		ew.err = err
+	}
+	return n, err
+}
 
 func writeMetaHeader(w io.Writer, title string) {
 	fmt.Fprintf(w, `<header><h1>%s</h1><div class="meta">Generated %s</div></header>`,
@@ -323,6 +339,29 @@ func writeStatsBar(w io.Writer, totalFiles, totalTypos, totalSuggestions int) {
 
 // --- Text report with optional terminal colors ---
 
+// typoMessage renders the shared "X appears to be a typo" phrase with an
+// optional "Did you mean ...?" suffix, keeping the text reporter and SARIF
+// messages in sync. suggestions must be pre-joined (or colored); empty means
+// no suffix.
+func typoMessage(word, suggestions string) string {
+	msg := fmt.Sprintf("\"%s\" appears to be a typo.", word)
+	if suggestions != "" {
+		msg += fmt.Sprintf(" Did you mean: %s?", suggestions)
+	}
+	return msg
+}
+
+// sortedResultPaths returns the result map's keys sorted, so every report
+// format writes deterministic output.
+func sortedResultPaths(results map[string][]MisspelledWord) []string {
+	paths := make([]string, 0, len(results))
+	for p := range results {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
 // formatTypoLine renders a single misspelled word as a report line (without
 // the leading bullet/prefix). Callers may pass pre-colored word and
 // suggestion strings for terminal output; pass empty strings to use the raw
@@ -335,14 +374,11 @@ func formatTypoLine(m MisspelledWord, word, suggestions string) string {
 	if suggestions == "" && len(m.Suggestions) > 0 {
 		suggestions = strings.Join(m.Suggestions, ", ")
 	}
-	base := fmt.Sprintf("Line %d, Col %d: \"%s\" appears to be a typo.", m.LineNumber, m.Column, word)
-	if len(m.Suggestions) > 0 {
-		return fmt.Sprintf("%s Did you mean: %s?", base, suggestions)
-	}
-	return base
+	return fmt.Sprintf("Line %d, Col %d: %s", m.LineNumber, m.Column, typoMessage(word, suggestions))
 }
 
-func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) {
+func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) error {
+	w := &errWriter{w: writer}
 	useColors := false
 	if f, ok := writer.(*os.File); ok {
 		fi, err := f.Stat()
@@ -354,22 +390,16 @@ func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) {
 	_, totalTypos, _ := summarizeStats(results)
 
 	if len(results) == 0 {
-		fmt.Fprintln(writer, "No typos found.")
-		return
+		fmt.Fprintln(w, "No typos found.")
+		return w.err
 	}
-	fmt.Fprintf(writer, "Typos found (%d total):\n", totalTypos)
+	fmt.Fprintf(w, "Typos found (%d total):\n", totalTypos)
 
-	// Sort file paths for deterministic output. HTML and JSON already do this;
-	// text was the only format whose line order varied run-to-run.
-	paths := make([]string, 0, len(results))
-	for p := range results {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+	paths := sortedResultPaths(results)
 
 	for _, file := range paths {
 		words := results[file]
-		fmt.Fprintf(writer, "\n--- In file %s ---\n", file)
+		fmt.Fprintf(w, "\n--- In file %s ---\n", file)
 		for _, m := range words {
 			word := m.Word
 			suggestionsStr := strings.Join(m.Suggestions, ", ")
@@ -379,9 +409,10 @@ func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) {
 					suggestionsStr = ansiGreen + suggestionsStr + ansiReset
 				}
 			}
-			fmt.Fprintf(writer, "- %s\n", formatTypoLine(m, word, suggestionsStr))
+			fmt.Fprintf(w, "- %s\n", formatTypoLine(m, word, suggestionsStr))
 		}
 	}
+	return w.err
 }
 
 // --- JSON report ---
@@ -419,11 +450,7 @@ func generateJSONReport(writer io.Writer, results map[string][]MisspelledWord) e
 	report.Summary.Typos = totalTypos
 	report.Summary.Suggestions = totalSuggestions
 
-	paths := make([]string, 0, len(results))
-	for p := range results {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+	paths := sortedResultPaths(results)
 
 	report.Files = make([]jsonFile, 0, len(paths))
 	for _, p := range paths {

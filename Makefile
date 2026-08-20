@@ -132,10 +132,10 @@ bench: dictionary.txt.zst
 .PHONY: bench-cmp
 bench-cmp: dictionary.txt.zst
 	@echo "=== Full dictionary load (decompress + scan into map) ==="
-	@go test ./... -bench='BenchmarkGzipDecompress$$|BenchmarkZstdDecompress$$' -benchmem -count=3 -timeout=60s 2>&1 | grep -E '^(Benchmark|ok |FAIL|---)' || true
+	@go test ./... -bench='BenchmarkZstdDecompress$$' -benchmem -count=3 -timeout=60s 2>&1 | grep -E '^(Benchmark|ok |FAIL|---)' || true
 	@echo ""
 	@echo "=== Raw decompression throughput ==="
-	@go test ./... -bench='BenchmarkGzipDecompressOnly$$|BenchmarkZstdDecompressOnly$$' -benchmem -count=3 -timeout=60s 2>&1 | grep -E '^(Benchmark|ok |FAIL|---)' || true
+	@go test ./... -bench='BenchmarkZstdDecompressOnly$$' -benchmem -count=3 -timeout=60s 2>&1 | grep -E '^(Benchmark|ok |FAIL|---)' || true
 
 # -------------------------------------------------------------------
 # Cleanup

@@ -5,8 +5,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // FixResult summarizes what was changed (or would be changed) in one file.
@@ -16,10 +17,14 @@ type FixResult struct {
 	Skipped  int // typos with no suggestion (left untouched)
 }
 
-// fixKey identifies a specific typo occurrence by line and word.
+// fixKey identifies a specific typo occurrence by line and column (1-based
+// rune column, matching MisspelledWord.Column). Keying by column — not just
+// word — ensures --fix replaces only the flagged occurrence, not every token
+// on the line that happens to spell the same (e.g. inside inline code or an
+// identifier fragment the checker deliberately skipped).
 type fixKey struct {
-	line int
-	word string
+	line   int
+	column int // 1-based rune column, same as MisspelledWord.Column
 }
 
 // runFixer applies the top suggestion for each typo across all flagged files.
@@ -36,11 +41,7 @@ func runFixer(results map[string][]MisspelledWord, dryRun bool) (totalFixed, tot
 		return 0, 0, nil
 	}
 
-	paths := make([]string, 0, len(results))
-	for p := range results {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+	paths := sortedResultPaths(results)
 
 	filesChanged := 0
 	for _, path := range paths {
@@ -79,20 +80,27 @@ func reportFixFile(res FixResult, dryRun bool) {
 	fmt.Printf("%s: %s %d, skipped %d\n", res.FilePath, prefix, res.Fixes, res.Skipped)
 }
 
-// fixFile rewrites a single file, replacing each typo with its top suggestion.
-// It re-tokenizes line by line (using the same word regex as the checker) so
-// replacements stay correct regardless of multibyte/rune column math.
-func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error) {
-	res := FixResult{FilePath: path}
-
+// buildFixRepl maps each typo's (line, column) to its top suggestion, counting
+// uncorrectable typos (no suggestion) as skipped. Shared by fixFile and
+// fixStdin so the fixer never diverges between file and stdin modes.
+func buildFixRepl(typos []MisspelledWord, res *FixResult) map[fixKey]string {
 	repl := make(map[fixKey]string, len(typos))
 	for _, t := range typos {
 		if len(t.Suggestions) == 0 {
 			res.Skipped++
 			continue
 		}
-		repl[fixKey{t.LineNumber, t.Word}] = t.Suggestions[0]
+		repl[fixKey{t.LineNumber, t.Column}] = t.Suggestions[0]
 	}
+	return repl
+}
+
+// fixFile rewrites a single file, replacing each typo with its top suggestion.
+// It re-tokenizes line by line (using the same word regex as the checker) so
+// replacements stay correct regardless of multibyte/rune column math.
+func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error) {
+	res := FixResult{FilePath: path}
+	repl := buildFixRepl(typos, &res)
 
 	in, err := os.Open(path)
 	if err != nil {
@@ -128,8 +136,33 @@ func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error
 	return res, writeAtomic(path, out.String())
 }
 
-// replaceLine rebuilds a single line, substituting any token that matches a
-// recorded (line, word) typo with its replacement.
+// fixStdin applies the top suggestion for each typo in piped stdin and writes
+// the corrected stream to stdout. Same re-tokenization and case-preserving
+// replacement as fixFile, but in-memory (no file path). The corrected text is
+// always printed (a preview); nothing is persisted anywhere.
+func fixStdin(r io.Reader, typos []MisspelledWord) (fixed, skipped int, err error) {
+	res := FixResult{FilePath: "<stdin>"}
+	repl := buildFixRepl(typos, &res)
+	lr := newLineReader(r, maxLineLen)
+	var out strings.Builder
+	for {
+		line, lineNumber, err := lr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+		line = strings.TrimSuffix(line, "\n")
+		out.WriteString(replaceLine(line, lineNumber, repl, &res))
+		out.WriteByte('\n')
+	}
+	if _, err := io.WriteString(os.Stdout, out.String()); err != nil {
+		return 0, 0, err
+	}
+	return res.Fixes, res.Skipped, nil
+}
+
 func replaceLine(line string, lineNumber int, repl map[fixKey]string, res *FixResult) string {
 	matches := wordRegex.FindAllStringIndex(line, -1)
 	if len(matches) == 0 {
@@ -138,16 +171,39 @@ func replaceLine(line string, lineNumber int, repl map[fixKey]string, res *FixRe
 	var b strings.Builder
 	last := 0
 	for _, m := range matches {
+		// Compute 1-based rune column from the byte offset, matching
+		// MisspelledWord.Column so only the exact flagged token is replaced.
+		col := utf8.RuneCountInString(line[:m[0]]) + 1
 		word := line[m[0]:m[1]]
-		if r, ok := repl[fixKey{lineNumber, word}]; ok {
+		if r, ok := repl[fixKey{lineNumber, col}]; ok {
 			b.WriteString(line[last:m[0]])
-			b.WriteString(r)
+			b.WriteString(matchCase(word, r))
 			last = m[1]
 			res.Fixes++
 		}
 	}
 	b.WriteString(line[last:])
 	return b.String()
+}
+
+// matchCase applies the typo's capitalization to the replacement so --fix
+// keeps "Teh" -> "The" and "TEH" -> "THE" instead of dropping to lowercase.
+// Lowercase typo gets the lowercase suggestion untouched.
+func matchCase(typo, suggestion string) string {
+	if typo == strings.ToUpper(typo) {
+		// ALL CAPS typo -> all-caps suggestion.
+		return strings.ToUpper(suggestion)
+	}
+	// Title-case typo (first rune uppercase) -> uppercase the suggestion's
+	// first rune, keep the rest. Use utf8 to stay safe on accented letters.
+	if r, _ := utf8.DecodeRuneInString(typo); r != utf8.RuneError && unicode.IsUpper(r) {
+		rs := []rune(suggestion)
+		if len(rs) > 0 {
+			rs[0] = unicode.ToUpper(rs[0])
+			return string(rs)
+		}
+	}
+	return suggestion
 }
 
 // writeAtomic writes content to a temp file in the same directory, then renames
@@ -179,7 +235,9 @@ func writeAtomic(path, content string) error {
 
 	// Preserve original permissions where possible.
 	if info, err := os.Stat(path); err == nil {
-		_ = os.Chmod(tmpName, info.Mode())
+		if err := os.Chmod(tmpName, info.Mode()); err != nil {
+			return err
+		}
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return err

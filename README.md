@@ -12,13 +12,19 @@ typos with ranked "did you mean?" suggestions.
   colored terminal output, live progress bar.
 - **Unicode-aware** — handles accents (café), contractions (don't, it's),
   hyphenated words (state-of-the-art).
-- **Multiple outputs** — plain text with colors, responsive dark-mode HTML, or machine-readable JSON.
+- **Multiple outputs** — plain text with colors, responsive dark-mode HTML, machine-readable JSON, or SARIF v2.1.0 (for GitHub Code Scanning).
 - **Auto-fix** — `--fix` rewrites each typo to its top suggestion in place (with `--dry-run`).
 - **Watch mode** — `fsnotify` re-checks files automatically as you save.
 - **Fast startup** — the suggestion index is built once, then persisted on disk
   and reused across runs (invalidation is automatic on dictionary change).
 - **Prose-focused** — identifier fragments (`Mi03x_er`), binary files, and
-  dependency trees (`.git`, `node_modules`, …) are skipped by default.
+  dependency trees (`.git`, `node_modules`, …) are skipped by default. Markdown
+  files (`.md`, `.markdown`) are scanned prose-only: fenced code blocks, inline
+  code, link URLs, and YAML frontmatter are stripped before tokenizing.
+- **Scopeable** — restrict a scan to your changed files with `--git-diff` (against
+  a ref or `staged`), keep project words valid with `--ignore-word`, and filter
+  short tokens with `--min-word-length`. A `.spellignore` file glob-excludes like
+  `.gitignore`.
 - **CI-friendly** — deterministic output, machine-readable JSON, and distinct
   exit codes: `1` when typos are found or remain unfixed, `2` when the tool
   cannot run.
@@ -65,12 +71,18 @@ go build -o spellchecker .
 | `--dict` | Custom CSV dictionary | `--dict my_words.csv` |
 | `--personal-dict` | Extra words to ignore (one per line) | `--personal-dict .words.txt` |
 | `--exclude` | Comma-separated glob patterns to skip | `--exclude "*.log,*.tmp"` |
-| `--format` | Output format: `txt`, `html`, or `json` | `--format json` |
+| `--format` | Output format: `txt`, `html`, `json`, or `sarif` | `--format sarif` |
 | `--output` | Write report to file or directory | `--output report.html` |
 | `--fix` | Rewrite each typo to its top suggestion, in place | `--fix` |
 | `--dry-run` | With `--fix`: show changes without writing | `--fix --dry-run` |
+| `--version` | Print version and exit | `--version` |
 | `--watch` | Watch a directory and re-check on save | `--watch` |
 | `--verbose` | Log skipped (excluded/binary) files | `--verbose` |
+| `--quiet` | Suppress all output; only the exit code is meaningful | `--quiet` |
+| `--ignore-word` | Word(s) to treat as valid (repeatable or comma-separated) | `--ignore-word teh,aux` |
+| `--min-word-length` | Skip tokens shorter than N characters (default 0 = check all) | `--min-word-length 3` |
+| `--git-diff` | Scan only files changed vs a git ref (`staged` for the index) | `--git-diff main` |
+| `--config` | Explicit path to a config file (overrides the auto search) | `--config ./ci.yaml` |
 
 Settings precedence: **flags > config file > defaults**. A flag only overrides
 the config file when explicitly passed on the command line, so a value set in
@@ -78,9 +90,12 @@ the config file when explicitly passed on the command line, so a value set in
 
 #### Exclude patterns
 
-`--exclude` accepts comma-separated glob patterns matched against each file or
-directory **name** (the basename, not the full path). Trailing slashes are
-stripped, so `build/` and `build` behave identically. Use `*` wildcards freely:
+`--exclude` accepts comma-separated glob patterns. Patterns without a slash
+are matched against each file or directory **name** (the basename). Patterns
+containing a slash (e.g. `third_party/**`, `src/generated/*`) are matched
+against the full relative path, so you can exclude by directory path. Trailing
+slashes are stripped, so `build/` and `build` behave identically. Use `*`
+wildcards freely:
 
 | Pattern | Matches | Does not match |
 |---------|---------|----------------|
@@ -135,7 +150,24 @@ file is scanned normally. A single pathological line never fails the file.
 
 # Watch a source folder during development
 ./spellchecker --watch ./src/
-```
+
+# Emit SARIF for GitHub Code Scanning
+./spellchecker --format sarif --output results.sarif ./my_project/
+
+# Scan only files changed on this branch vs main
+./spellchecker --git-diff main ./my_project/
+
+# Scan only staged files in a pre-commit hook
+./spellchecker --git-diff staged .
+
+# Treat project jargon as valid for one run
+./spellchecker --ignore-word aux,k8s ./src/
+
+# Skip 1-2 letter tokens to cut false positives
+./spellchecker --min-word-length 3 ./docs/
+
+# Run quietly in CI: only the exit code matters
+./spellchecker --quiet ./src/
 
 ### Config file
 
@@ -155,6 +187,56 @@ output: "./reports/"
 The cwd config wins over the home-directory config. Any flag you pass on the
 command line overrides the corresponding config key; keys you don't pass fall
 through to the config file, then to defaults.
+### Scoping and filtering
+
+#### `.spellignore`
+
+A `.spellignore` file in the working directory holds one glob pattern per line
+(`#` comments and blank lines ignored). Its patterns are merged with `--exclude`
+and the built-in excludes, so you don't need to repeat them on every run:
+
+```
+# .spellignore
+vendor/
+*.generated.go
+third_party/**
+```
+
+The `.spellignore` file itself is always skipped.
+
+#### `--git-diff`
+
+Restrict the scan to files changed relative to a git ref. Pass `staged` for the
+index, or any ref (`main`, `HEAD~1`, a tag). The resulting file list is filtered
+by the same exclude + binary rules as a directory walk, so ignored or binary
+files are still skipped:
+
+```bash
+./spellchecker --git-diff main .            # files changed vs main
+./spellchecker --git-diff staged .          # files in the index (pre-commit)
+```
+
+Outside a git repo, or with an unknown ref, the tool exits `2` with a git error.
+
+#### Markdown-aware scanning
+
+Files ending in `.md` or `.markdown` are scanned prose-only: fenced code blocks
+(`\`\`\`` or `~~~`), inline code spans, link destinations (`[text](url)`), bare
+URLs, and YAML frontmatter (`---` … `---`) are stripped before tokenizing, so
+code and metadata don't get flagged. Line and column numbers stay accurate
+against the original file.
+
+#### `--ignore-word` and `--min-word-length`
+
+`--ignore-word` accepts project jargon for a single run (repeatable, or
+comma-separated). Words are lowercased and merged into the dictionary:
+
+```bash
+./spellchecker --ignore-word teh --ignore-word aux,k8s ./src/
+```
+
+`--min-word-length N` skips tokens shorter than N characters — useful to cut
+false positives on 1-2 letter abbreviations. `0` (default) checks every token.
 
 ### Dictionary formats
 
@@ -199,7 +281,7 @@ Typos found (2 total):
 | `--fix` applied and **every** typo was correctable | `0` |
 | `--fix` applied but some typos had no suggestion and were skipped | `1` |
 | `--fix --dry-run` with typos present | `1` |
-| Fatal error (bad usage, unknown flag, config/dictionary load failure) | `2` |
+| Fatal error (bad usage, unknown flag, config/dictionary load failure, missing/unreadable scan path) | `2` |
 
 `1` means "spelling problems exist", `2` means "couldn't run at all", so CI can
 tell the difference between a lint failure and a tooling failure. The "skipped
@@ -233,6 +315,26 @@ diagnostic messages go to stderr, so stdout is clean and pipeable:
 Files are sorted by path for deterministic output, and words with no suggestion
 serialize as `"suggestions": []`.
 
+#### SARIF output
+
+`--format sarif` (or `--output results.sarif`) emits a SARIF v2.1.0 log — the
+format GitHub Code Scanning ingests. Each typo becomes one `warning` result
+under rule `spellcheck/typo`, with file/line/column location and a stable
+`partialFingerprints.primary` (`path:line:word`) so GitHub de-duplicates
+findings across runs:
+
+```bash
+./spellchecker --format sarif --output results.sarif ./my_project/
+```
+
+Upload it from a workflow:
+
+```yaml
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: results.sarif
+```
+
 #### Fix mode
 
 `--fix` rewrites each typo to its top-ranked suggestion, in place. Writes are
@@ -248,7 +350,7 @@ crash never leaves a half-written file.
 - Exit code reflects the result — see the [Exit codes](#exit-codes) table above.
   In short: a clean fix exits `0`; a fix that left skipped typos behind exits `1`
   so CI surfaces them for review.
-- Fix mode does not read from stdin.
+- Fix mode works on piped stdin (`--fix -` writes the corrected stream to stdout; `--dry-run` affects only the exit code, not the output). Replacements preserve typo capitalization (`Teh` to `The`, `TEH` to `THE`).
 
 > **Note:** suggestions are ranked by edit distance, then by transposition
 > matches (`teh` → `the`), letter ordering, and shared prefix — so `worl` becomes
@@ -283,7 +385,7 @@ crash never leaves a half-written file.
 | `make fmt-check` | Verify all files are `go fmt`-compliant (CI-safe) |
 | `make staticcheck` | Run static analysis |
 | `make bench` | Run compression benchmarks |
-| `make bench-cmp` | Compare gzip vs zstd decompression |
+| `make bench-cmp` | Run zstd decompression benchmarks |
 | `make dict` | Regenerate `dictionary.txt.zst` from `dictionary.csv` |
 | `make clean` | Remove build artifacts |
 
@@ -312,11 +414,14 @@ git commit --no-verify
 ├── dictionary.go        Dictionary loading (zstd-compressed embedded dict)
 ├── suggestions.go       BK-tree + Levenshtein distance for suggestions
 ├── tree_cache.go        On-disk persistence of the built suggestion tree
+├── fixer.go             Auto-fix with atomic writes (--fix)
+├── watcher.go           Watch mode (fsnotify)
 ├── reporter.go          Text, HTML, and JSON output generation
-├── style.css            Embedded stylesheet for HTML reports (//go:embed)
-├── fixer.go             Auto-fix mode (--fix / --dry-run), atomic writes
-├── watcher.go           fsnotify-based watch mode
 ├── gen_dict.go          Dictionary generator (//go:build ignore)
+├── diff.go              Git-diff file list (--git-diff)
+├── markdown.go          Markdown noise stripping (fences, inline code, URLs)
+├── sarif.go             SARIF v2.1.0 report generation
+├── spellignore.go       .spellignore file loader
 ├── main_test.go             Config validation + config-file loader tests
 ├── checker_test.go          Scanner, tokenizer, and file-collection tests
 ├── dictionary_test.go       Dictionary parsing/loading tests
@@ -326,10 +431,13 @@ git commit --no-verify
 ├── json_report_test.go      JSON report shape and escaping tests
 ├── fixer_test.go            Auto-fix and atomic-write tests
 ├── watcher_test.go          Watch-mode batch and directory-watch tests
+├── markdown_test.go         Markdown stripping tests
+├── sarif_report_test.go     SARIF report shape tests
+├── spellignore_test.go      .spellignore loader tests
 ├── Makefile                 Build, test, lint, benchmark targets
 ├── dictionary.txt.zst       Embedded word list (zstd-compressed, 324 KB)
 ├── dictionary.csv           Source CSV for dictionary generation
-├── dictionary_bench_test.go Decompression speed benchmarks (gzip vs zstd)
+├── dictionary_bench_test.go Decompression speed benchmarks (zstd)
 ├── .githooks/pre-commit     Git pre-commit hook
 ├── test/                    Integration test fixtures
 └── .github/workflows/       CI pipeline

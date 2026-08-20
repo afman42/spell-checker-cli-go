@@ -235,3 +235,94 @@ func TestBKTreeAddDuplicate(t *testing.T) {
 		t.Errorf("expected 'apple' exactly once, got %d", count)
 	}
 }
+
+// TestKeyboardAdjacent verifies the QWERTY-adjacency detector flags a single
+// adjacent-key substitution and rejects non-adjacent or multi-edit deltas.
+func TestKeyboardAdjacent(t *testing.T) {
+	cases := []struct {
+		typo, word string
+		want       bool
+	}{
+		{"mork", "mirk", true},  // o and i adjacent (same top row of letters)
+		{"mork", "mark", false}, // o and a not adjacent
+		{"cafe", "cake", false}, // f and k not adjacent
+		{"mork", "work", false}, // multi-edit delta
+	}
+	for _, c := range cases {
+		if got := keyboardAdjacent(c.typo, c.word); got != c.want {
+			t.Errorf("keyboardAdjacent(%q, %q) = %v, want %v", c.typo, c.word, got, c.want)
+		}
+	}
+}
+
+// TestRankAdjacencyWins verifies an equal-distance, equal-prefix tie is broken
+// in favour of the one candidate that is a single QWERTY-adjacent keypress
+// from the typo, rather than alphabetical order.
+func TestRankAdjacencyWins(t *testing.T) {
+	// typo "mork": both "mark" and "mirk" are one substitution apart sharing
+	// the same prefix; only "mirk" (o->i, adjacent) should edge ahead.
+	scored := []scoredWord{
+		{word: "mark", distance: 1},
+		{word: "mirk", distance: 1},
+	}
+	got := rankSuggestions(scored, "mork")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 suggestions, got %d", len(got))
+	}
+	if got[0] != "mirk" {
+		t.Errorf("adjacency tie-break: want first 'mirk', got %q first", got[0])
+	}
+}
+
+// TestIsSubsequence verifies rune-safe comparison: ASCII and multibyte.
+func TestIsSubsequence(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"empty a", "", "hello", true},
+		{"exact match", "abc", "abc", true},
+		{"subsequence", "abc", "xaybzc", true},
+		{"not subsequence", "abc", "xayz", false},
+		{"order matters", "ba", "abc", false},
+		// Multibyte: "é" (U+00E9) is a subsequence of "café".
+		{"multibyte subsequence", "é", "café", true},
+		// "éa" is not in "café" — 'é' appears but 'a' comes before it.
+		{"multibyte not subsequence", "éa", "café", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSubsequence(tc.a, tc.b); got != tc.want {
+				t.Errorf("isSubsequence(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCommonPrefixLen verifies rune-count-based prefix length for both ASCII
+// and multibyte input.
+func TestCommonPrefixLen(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want int
+	}{
+		{"identical", "hello", "hello", 5},
+		{"partial", "hello", "he", 2},
+		{"no prefix", "abc", "xyz", 0},
+		{"empty a", "", "hello", 0},
+		{"empty b", "hello", "", 0},
+		// Multibyte: "café" and "café" share 4 runes.
+		{"multibyte identical", "café", "café", 4},
+		// "café" and "cafe" share 3 runes ("caf"), then é ≠ e.
+		{"multibyte partial", "café", "cafe", 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := commonPrefixLen(tc.a, tc.b); got != tc.want {
+				t.Errorf("commonPrefixLen(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}

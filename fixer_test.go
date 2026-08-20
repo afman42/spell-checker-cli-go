@@ -243,3 +243,87 @@ func containsAll(s string, subs []string) bool {
 	}
 	return true
 }
+
+// TestMatchCase ensures --fix preserves typo capitalization when replacing.
+func TestMatchCase(t *testing.T) {
+	cases := []struct{ typo, sug, want string }{
+		{"teh", "the", "the"},    // lowercase stays lowercase
+		{"Teh", "the", "The"},    // title-case typo -> title-case replacement
+		{"TEH", "the", "THE"},    // ALL CAPS typo -> all-caps replacement
+		{"Café", "cafe", "Cafe"}, // accented title typo caps first rune only, no panic
+	}
+	for _, c := range cases {
+		if got := matchCase(c.typo, c.sug); got != c.want {
+			t.Errorf("matchCase(%q, %q) = %q, want %q", c.typo, c.sug, got, c.want)
+		}
+	}
+}
+
+// TestFixFilePreservesInlineCode verifies that --fix replaces only the flagged
+// occurrence, not tokens inside inline code spans that the checker skipped.
+// Before the column-keyed fix, `teh` inside backticks was wrongly rewritten.
+func TestFixFilePreservesInlineCode(t *testing.T) {
+	dict := map[string]struct{}{"the": {}, "use": {}, "helper": {}, "but": {}, "is": {}, "wrong": {}, "here": {}}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "doc.md")
+	content := "Use the `teh` helper but teh is wrong here.\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Markdown stripping is on by default in scanOpts; set it for this test.
+	scanOpts.Markdown = true
+	typos := detectTypos(t, path, dict)
+	// The checker should flag only the prose "teh", not the one in code.
+	if len(typos) != 1 {
+		t.Fatalf("expected 1 typo (prose teh only), got %d: %+v", len(typos), typos)
+	}
+	if typos[0].Column != 24 { // "Use the `teh` helper but " = 23 chars + 1
+		t.Logf("column = %d (expected ~24)", typos[0].Column)
+	}
+
+	if _, err := fixFile(path, typos, false); err != nil {
+		t.Fatalf("fixFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := "Use the `teh` helper but the is wrong here.\n"
+	if string(got) != want {
+		t.Errorf("inline code corrupted:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}
+
+// TestFixFilePreservesIdentifierFragment verifies that --fix does not rewrite
+// a typo that appears inside an identifier (e.g. "teh_var") that the checker
+// skipped via isIdentifierFragment.
+func TestFixFilePreservesIdentifierFragment(t *testing.T) {
+	dict := map[string]struct{}{"the": {}, "cat": {}, "and": {}, "are": {}, "different": {}}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "id.txt")
+	content := "teh cat and teh_var are different.\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	scanOpts.Markdown = false
+	defer func() { scanOpts.Markdown = true }() // restore package default
+	typos := detectTypos(t, path, dict)
+	// Only the standalone "teh" should be flagged, not "teh" in "teh_var".
+	// wordRegex splits "teh_var" into "teh" and "var"; isIdentifierFragment
+	// skips the "teh" because it's adjacent to "_".
+	if len(typos) != 1 {
+		t.Fatalf("expected 1 typo, got %d: %+v", len(typos), typos)
+	}
+
+	if _, err := fixFile(path, typos, false); err != nil {
+		t.Fatalf("fixFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := "the cat and teh_var are different.\n"
+	if string(got) != want {
+		t.Errorf("identifier fragment corrupted:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}

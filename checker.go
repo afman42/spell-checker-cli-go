@@ -93,10 +93,6 @@ type CheckResult struct {
 	Err      error
 }
 
-func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
-	return runConcurrentCheckerWithDict(rootPath, NewConcurrentDictionary(dictionary), excludePatterns, verbose)
-}
-
 // runConcurrentCheckerWithDict is the core scanner using an already-built
 // ConcurrentDictionary, so the BK-tree is constructed only once per run.
 func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
@@ -105,11 +101,18 @@ func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDic
 	if err != nil {
 		return nil, err
 	}
-	if len(allFiles) == 0 {
+	return runCheckerOnFiles(allFiles, concurrentDict, verbose)
+}
+
+// runCheckerOnFiles runs the worker pool over an already-collected list of
+// files. Shared by the directory walk (runConcurrentCheckerWithDict) and the
+// --git-diff path (runGitDiffChecker), which supplies its own file list.
+func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, verbose bool) (map[string][]MisspelledWord, error) {
+	if len(files) == 0 {
 		return make(map[string][]MisspelledWord), nil
 	}
 
-	totalFiles := len(allFiles)
+	totalFiles := len(files)
 	numWorkers := runtime.NumCPU()
 	jobBuf := numWorkers * 10
 	if jobBuf < 100 {
@@ -119,14 +122,14 @@ func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDic
 	results := make(chan CheckResult, jobBuf)
 
 	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		wg.Add(1)
 		go worker(&wg, jobs, results, concurrentDict)
 	}
 
 	// Sender goroutine: pushes collected file paths to workers
 	go func() {
-		for _, path := range allFiles {
+		for _, path := range files {
 			jobs <- path
 		}
 		close(jobs)
@@ -174,11 +177,72 @@ func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDic
 	return allTypos, nil
 }
 
+// runGitDiffChecker restricts the scan to files changed relative to a git ref
+// (--git-diff). The ref is resolved by gitDiffFiles; the resulting file list is
+// filtered by the same exclude + binary rules as a directory walk so ignored
+// or binary files are still skipped. Runs the same worker pool as the walk.
+func runGitDiffChecker(ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
+	raw, err := gitDiffFiles(ref)
+	if err != nil {
+		return nil, fmt.Errorf("git-diff: %w", err)
+	}
+	// only checks files under sub/.  Normalize both sides to use forward
+	// slashes and trim trailing slashes for a clean prefix match.
+	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
+	if rootPath != "." {
+		filtered := raw[:0]
+		for _, p := range raw {
+			pNorm := filepath.ToSlash(filepath.Clean(p))
+			if pNorm == rootPath || strings.HasPrefix(pNorm, rootPath+"/") {
+				filtered = append(filtered, p)
+			}
+		}
+		raw = filtered
+	}
+	patterns := mergeDefaultExcludes(excludePatterns)
+	var files []string
+	for _, p := range raw {
+		exclude, err := shouldExclude(p, patterns)
+		if err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", p, err)
+			}
+			continue
+		}
+		if exclude {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Skipping excluded file: %s\n", p)
+			}
+			continue
+		}
+		isBinary, err := isLikelyBinary(p)
+		if err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", p, err)
+			}
+			continue
+		}
+		if isBinary {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", p)
+			}
+			continue
+		}
+		files = append(files, p)
+	}
+	if verbose {
+		fmt.Fprintf(os.Stderr, "git-diff: %d file(s) to check\n", len(files))
+	}
+	return runCheckerOnFiles(files, concurrentDict, verbose)
+}
+
 // defaultExcludes are directories and files skipped even when no --exclude is
 // given. They cover VCS metadata, dependency stores, and tool caches that are
 // never meant to be spell-checked. User patterns are merged on top.
 var defaultExcludes = []string{
 	".git", ".hg", ".svn", ".bzr",
+	// Tool-local config consumed by the checker itself; never spell-check.
+	".spellignore", ".spellcheckerrc.yaml", ".spellcheckerrc.yml",
 	"node_modules", "bower_components",
 	".venv", "venv", "virtualenv",
 	"_vendor", "vendor",
@@ -203,8 +267,15 @@ func collectFiles(rootPath string, excludePatterns []string, verbose bool) ([]st
 	patterns := mergeDefaultExcludes(excludePatterns)
 	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error accessing path %q: %v\n", path, err)
-			return err
+			// A failed root means nothing can be scanned: report it. A failed
+			// subdirectory is just one inaccessible subtree — skip it and
+			// keep scanning the rest, matching the per-file error aggregation
+			// that already keeps partial results.
+			if path == rootPath {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "Error accessing path %q (skipping): %v\n", path, err)
+			return nil
 		}
 
 		if info.IsDir() {
@@ -316,12 +387,45 @@ func checkFile(filePath string, dictionary *ConcurrentDictionary) ([]MisspelledW
 	}
 	defer file.Close()
 
+	// Markdown-aware scanning: strip fenced code, inline code, link URLs and
+	// YAML frontmatter before tokenizing so prose is checked, code isn't.
+	// Inexpensive (one read) on typically-small .md files; non-markdown paths
+	// keep the streaming lineReader to stay within maxLineLen memory.
+	if scanOpts.Markdown && isMarkdownExt(filePath) {
+		raw, err := io.ReadAll(file)
+		if err != nil {
+			return nil, fmt.Errorf("failed reading %s: %w", filePath, err)
+		}
+		return scanLinesForTypos(scanMarkdownLines(raw), dictionary)
+	}
+
 	misspelledWords, err := scanForTypos(file, dictionary)
 	if err != nil {
 		return nil, fmt.Errorf("failed scanning %s: %w", filePath, err)
 	}
 	return misspelledWords, nil
 }
+
+// isMarkdownExt reports whether filePath has a recognised markdown extension.
+func isMarkdownExt(filePath string) bool {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".md", ".markdown":
+		return true
+	}
+	return false
+}
+
+// scanOptions controls per-scan filters applied inside scanForTypos. Set once
+// per run from main; avoids threading extra params through every call site.
+type scanOptions struct {
+	// MinWordLength skips tokens shorter than this. 0 = check all.
+	MinWordLength int
+	// Markdown strips code fences/URLs/frontmatter when true.
+	Markdown bool
+}
+
+// scanOpts is the active scan configuration, set by run() before scanning.
+var scanOpts = scanOptions{Markdown: true}
 
 // scanForTypos reads a stream line by line and returns misspelled words with
 // 1-based line and (rune) column positions.
@@ -424,6 +528,33 @@ nextLine:
 	}
 }
 
+// scanLineForTypos appends the misspelled words found in a single line to
+// misspelled and returns the extended slice. Shared by the streaming
+// (scanForTypos) and markdown (scanLinesForTypos) paths so the
+// tokenize/filter/report loop exists in exactly one place.
+func scanLineForTypos(line string, lineNumber int, dictionary *ConcurrentDictionary, misspelled []MisspelledWord) []MisspelledWord {
+	for _, indices := range wordRegex.FindAllStringIndex(line, -1) {
+		word := line[indices[0]:indices[1]]
+		// Skip tokens that are fragments of identifiers (adjacent to a digit
+		// or underscore, e.g. "Mi03x_er" splitting into "Mi"/"er" or "10px"
+		if isIdentifierFragment(line, indices[0], indices[1]) {
+			continue
+		}
+		if scanOpts.MinWordLength > 0 && utf8.RuneCountInString(word) < scanOpts.MinWordLength {
+			continue
+		}
+		if !dictionary.Contains(word) {
+			misspelled = append(misspelled, MisspelledWord{
+				Word:        word,
+				LineNumber:  lineNumber,
+				Column:      utf8.RuneCountInString(line[:indices[0]]) + 1,
+				Suggestions: dictionary.Suggest(word),
+			})
+		}
+	}
+	return misspelled
+}
+
 func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
 	var misspelledWords []MisspelledWord
 	lr := newLineReader(r, maxLineLen)
@@ -435,23 +566,23 @@ func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWo
 		if err != nil {
 			return nil, err
 		}
-		for _, indices := range wordRegex.FindAllStringIndex(line, -1) {
-			word := line[indices[0]:indices[1]]
-			// Skip tokens that are fragments of identifiers (adjacent to a digit
-			// or underscore, e.g. "Mi03x_er" splitting into "Mi"/"er" or "10px"
-			// into "px"). Spelling checkers flag prose, not code.
-			if isIdentifierFragment(line, indices[0], indices[1]) {
-				continue
-			}
-			if !dictionary.Contains(word) {
-				misspelledWords = append(misspelledWords, MisspelledWord{
-					Word:        word,
-					LineNumber:  lineNumber,
-					Column:      utf8.RuneCountInString(line[:indices[0]]) + 1,
-					Suggestions: dictionary.Suggest(word),
-				})
-			}
+		misspelledWords = scanLineForTypos(line, lineNumber, dictionary, misspelledWords)
+	}
+	return misspelledWords, nil
+}
+
+// scanLinesForTypos tokenizes an already-filtered slice of lines (one entry
+// per source line, empty for skipped lines).  Line numbers are 1-based and
+// derived from the slice index, so markdown code-fence/frontmatter stripping
+// (which blanks skipped lines rather than deleting them) keeps column/line
+// positions accurate against the original file.
+func scanLinesForTypos(lines []string, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
+	var misspelledWords []MisspelledWord
+	for i, line := range lines {
+		if line == "" {
+			continue
 		}
+		misspelledWords = scanLineForTypos(line, i+1, dictionary, misspelledWords)
 	}
 	return misspelledWords, nil
 }
@@ -477,12 +608,54 @@ func isIdentifierFragment(line string, start, end int) bool {
 
 func shouldExclude(filePath string, patterns []string) (bool, error) {
 	fileName := filepath.Base(filePath)
+	// Normalize the file path to forward slashes for consistent prefix
+	// matching against path-glob patterns (e.g. "third_party/**").
+	relPath := filepath.ToSlash(filePath)
 	for _, pattern := range patterns {
 		// Normalize trailing slashes so "build/" works like "build" — the
 		// README advertises both forms, and filepath.Match would otherwise
 		// fail to match a directory whose name has no trailing slash.
 		pattern = strings.TrimRight(pattern, `/\`)
 		if pattern == "" {
+			continue
+		}
+		// Patterns containing "/" match against the full relative path so
+		// "third_party/**" or "src/generated/*" work as documented. Patterns
+		// without "/" keep the basename match (backward compatible).
+		if strings.Contains(pattern, "/") {
+			// Handle "**" as a recursive prefix match, since filepath.Match
+			// treats * as single-component only. "third_party/**" should
+			// match any file under third_party/ at any depth.
+			if strings.HasSuffix(pattern, "/**") {
+				prefix := strings.TrimSuffix(pattern, "/**")
+				if relPath == prefix || strings.HasPrefix(relPath, prefix+"/") {
+					return true, nil
+				}
+				cleanRel := strings.TrimPrefix(relPath, "./")
+				if cleanRel == prefix || strings.HasPrefix(cleanRel, prefix+"/") {
+					return true, nil
+				}
+				continue
+			}
+			matched, err := filepath.Match(pattern, relPath)
+			if err != nil {
+				return false, err
+			}
+			if matched {
+				return true, nil
+			}
+			// Also try matching the pattern against the path after
+			// stripping any leading "./" from the file path.
+			cleanRel := strings.TrimPrefix(relPath, "./")
+			if cleanRel != relPath {
+				matched, err = filepath.Match(pattern, cleanRel)
+				if err != nil {
+					return false, err
+				}
+				if matched {
+					return true, nil
+				}
+			}
 			continue
 		}
 		matched, err := filepath.Match(pattern, fileName)
@@ -548,8 +721,8 @@ func isLikelyBinary(filePath string) (bool, error) {
 }
 
 // checkStdin processes text input from stdin
-func checkStdin(dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
-	misspelledWords, err := scanForTypos(os.Stdin, dictionary)
+func checkStdin(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
+	misspelledWords, err := scanForTypos(r, dictionary)
 	if err != nil {
 		return nil, fmt.Errorf("error reading stdin: %w", err)
 	}

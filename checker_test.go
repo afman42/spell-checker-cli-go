@@ -13,6 +13,13 @@ import (
 	"testing"
 )
 
+// runConcurrentChecker is the test convenience wrapper around
+// runConcurrentCheckerWithDict; production code calls the WithDict variant
+// directly so the BK-tree is built once per run.
+func runConcurrentChecker(rootPath string, dictionary map[string]struct{}, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
+	return runConcurrentCheckerWithDict(rootPath, NewConcurrentDictionary(dictionary), excludePatterns, verbose)
+}
+
 // Test for shouldExclude remains the same as it correctly tests the pattern logic.
 func TestShouldExclude(t *testing.T) {
 	testCases := []struct {
@@ -33,6 +40,15 @@ func TestShouldExclude(t *testing.T) {
 		{"trailing slash no match", "main.go", []string{"build/"}, false, false},
 		{"backslash trailing normalized", "build", []string{"build\\"}, true, false},
 		{"empty pattern skipped", "any.txt", []string{""}, false, false},
+		// Path-glob patterns (containing /) match against the full relative
+		// path, not just the basename. This is the fix for the README's
+		// advertised "third_party/**" and "src/generated/*" patterns.
+		{"path glob dir contents", "third_party/x.txt", []string{"third_party/*"}, true, false},
+		{"path glob no match", "src/main.go", []string{"third_party/*"}, false, false},
+		{"path glob subdir", "src/generated/a.go", []string{"src/generated/*"}, true, false},
+		{"path glob double star", "third_party/deep/nested/x.txt", []string{"third_party/**"}, true, false},
+		{"path glob with dot prefix", "./third_party/x.txt", []string{"third_party/*"}, true, false},
+		{"basename pattern still works", "x.log", []string{"*.log"}, true, false},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -626,5 +642,58 @@ func TestCollectFilesDefaultExcludes(t *testing.T) {
 		if strings.Contains(f, "node_modules") || strings.Contains(filepath.Base(f), ".git") {
 			t.Errorf("default exclude leaked: %s", f)
 		}
+	}
+}
+
+// TestScanLinesForTypos verifies the standalone line-scanner: blank lines
+// skipped, in-dictionary words ignored, correct 1-based line and column
+// numbers, identifier fragments skipped, and suggestions populated for a
+// near-miss word. This exercises scanLinesForTypos directly (it is only
+// reached via the untested git-diff/stdin paths otherwise).
+func TestScanLinesForTypos(t *testing.T) {
+	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
+	lines := []string{
+		"",
+		"hello world",
+		"helllo",
+		"",
+		"hello qwerx",
+	}
+	got, err := scanLinesForTypos(lines, dict)
+	if err != nil {
+		t.Fatalf("scanLinesForTypos error: %v", err)
+	}
+	var gotHelllo, gotQwerx *MisspelledWord
+	for i := range got {
+		switch got[i].Word {
+		case "helllo":
+			gotHelllo = &got[i]
+		case "qwerx":
+			gotQwerx = &got[i]
+		}
+	}
+	if gotHelllo == nil {
+		t.Fatalf("expected misspelling %q, got %#v", "helllo", got)
+	}
+	if gotHelllo.LineNumber != 3 || gotHelllo.Column != 1 {
+		t.Errorf("helllo at line/col %d/%d, want 3/1", gotHelllo.LineNumber, gotHelllo.Column)
+	}
+	found := false
+	for _, s := range gotHelllo.Suggestions {
+		if s == "hello" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("helllo suggestions %q, want to include %q", gotHelllo.Suggestions, "hello")
+	}
+	if gotQwerx == nil {
+		t.Fatalf("expected misspelling %q, got %#v", "qwerx", got)
+	}
+	if gotQwerx.LineNumber != 5 || gotQwerx.Column != 7 {
+		t.Errorf("qwerx at line/col %d/%d, want 5/7", gotQwerx.LineNumber, gotQwerx.Column)
+	}
+	if len(got) != 2 {
+		t.Errorf("scanLinesForTypos returned %d typos, want 2", len(got))
 	}
 }

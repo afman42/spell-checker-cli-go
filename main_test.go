@@ -206,6 +206,9 @@ func TestRunUsageErrors(t *testing.T) {
 	if code := quietRun(t, "--dry-run", "a.txt"); code != exitError {
 		t.Errorf("dry-run without fix: got exit %d, want %d", code, exitError)
 	}
+	if code := quietRun(t, "--dict", dict, filepath.Join(t.TempDir(), "missing")); code != exitError {
+		t.Errorf("missing path: got exit %d, want %d", code, exitError)
+	}
 }
 
 // TestRunFixMode verifies --fix rewrites the top suggestion and exits 0 when
@@ -226,5 +229,66 @@ func TestRunFixMode(t *testing.T) {
 	}
 	if string(got) != "hello world\n" {
 		t.Errorf("unexpected fixed content: %q", string(got))
+	}
+}
+
+// TestRunVersionFlag verifies --version prints version and exits 0 without
+// requiring a path argument or building the dictionary.
+func TestRunVersionFlag(t *testing.T) {
+	if code := run([]string{"--version"}); code != exitOK {
+		t.Errorf("run([--version]) = %d, want %d", code, exitOK)
+	}
+}
+
+// TestRunCleanStdinExitCode verifies that clean stdin (no typos) exits 0,
+// not 1. Before the fix, stdin always built a 1-key map even with zero typos,
+// causing a false "typos found" and wrong exit code.
+func TestRunCleanStdinExitCode(t *testing.T) {
+	dict := writeDict(t, "hello", "world", "this", "is", "fine")
+
+	// Temporarily replace stdin with clean text.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = origStdin; r.Close(); w.Close() }()
+
+	go func() {
+		w.Write([]byte("hello world this is fine\n"))
+		w.Close()
+	}()
+
+	if code := quietRun(t, "--dict", dict, "-"); code != exitOK {
+		t.Errorf("clean stdin: got exit %d, want %d", code, exitOK)
+	}
+}
+
+// TestRunGitDiffNotInRepoExitCode verifies that --git-diff outside a git repo
+// exits with exitError (2), not exitTypos (1). A git failure is a tooling
+// error, not a spelling problem.
+func TestRunGitDiffNotInRepoExitCode(t *testing.T) {
+	dict := writeDict(t, "hello")
+
+	// Run in a temp dir that is NOT a git repo.
+	dir := t.TempDir()
+	clean := filepath.Join(dir, "clean.txt")
+	if err := os.WriteFile(clean, []byte("hello\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// We need to chdir to the temp dir so git-diff fails there.
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origWd)
+
+	if code := quietRun(t, "--dict", dict, "--git-diff", "HEAD", "."); code != exitError {
+		t.Errorf("git-diff not in repo: got exit %d, want %d (exitError)", code, exitError)
 	}
 }

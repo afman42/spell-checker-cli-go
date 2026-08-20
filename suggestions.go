@@ -3,6 +3,7 @@ package main
 import (
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // BKNode is a node in the BK-tree. The fields are exported so a built tree can
@@ -100,6 +101,7 @@ type rankedWord struct {
 	word  string
 	eff   int
 	trans bool
+	adj   bool
 }
 
 // rankSuggestions sorts candidates by edit distance (closest first), then by
@@ -119,7 +121,12 @@ func rankSuggestions(scored []scoredWord, typo string) []string {
 		if osa < eff {
 			eff = osa
 		}
-		byEff[i] = rankedWord{word: s.word, eff: eff, trans: osa < s.distance}
+		byEff[i] = rankedWord{
+			word:  s.word,
+			eff:   eff,
+			trans: osa < s.distance,
+			adj:   keyboardAdjacent(typoLower, s.word),
+		}
 	}
 
 	sort.Slice(byEff, func(i, j int) bool {
@@ -137,6 +144,15 @@ func rankSuggestions(scored []scoredWord, typo string) []string {
 		aPre, bPre := commonPrefixLen(typoLower, a.word), commonPrefixLen(typoLower, b.word)
 		if aPre != bPre {
 			return aPre > bPre
+		}
+		// Around identical distance/prefix candidates, prefer the one that
+		// differs from the typo by a single QWERTY-adjacent keypress (e.g.
+		// "mork" -> "mirk": o and i are adjacent on the home rows). This only
+		// fires when one candidate is literally a fat-finger slip of the other;
+		// "lazi" -> "laze" vs "lazy" is NOT decided here (i is not adjacent to
+		// e or y), so that pair stays alphabetical.
+		if a.adj != b.adj {
+			return a.adj
 		}
 		return a.word < b.word
 	})
@@ -197,11 +213,12 @@ func isSubsequence(a, b string) bool {
 	if len(a) == 0 {
 		return true
 	}
+	ar := []rune(a)
 	i := 0
 	for _, r := range b {
-		if i < len(a) && byte(a[i]) == byte(r) {
+		if i < len(ar) && ar[i] == r {
 			i++
-			if i == len(a) {
+			if i == len(ar) {
 				return true
 			}
 		}
@@ -209,15 +226,19 @@ func isSubsequence(a, b string) bool {
 	return false
 }
 
-// commonPrefixLen returns the length (in bytes) of the shared prefix of a and b.
+// commonPrefixLen returns the length (in runes) of the shared prefix of a and b.
 func commonPrefixLen(a, b string) int {
 	n := 0
-	max := len(a)
-	if len(b) < max {
-		max = len(b)
-	}
-	for n < max && a[n] == b[n] {
+	for _, ra := range a {
+		rb, size := utf8.DecodeRuneInString(b)
+		if rb == utf8.RuneError && size == 0 {
+			break
+		}
+		if ra != rb {
+			break
+		}
 		n++
+		b = b[size:]
 	}
 	return n
 }
@@ -290,4 +311,47 @@ func levenshteinDistance(a, b string) int {
 		prev, cur = cur, prev
 	}
 	return prev[lenB]
+}
+
+// qwertyAdjacency maps a lowercase letter to the set of letters adjacent to it
+// on a standard QWERTY keyboard (physical neighbors, same or neighboring row).
+var qwertyAdjacency = map[byte]string{
+	'q': "wa", 'w': "qesa", 'e': "wrds", 'r': "etfd", 't': "ryfg",
+	'y': "tugh", 'u': "yihj", 'i': "uojk", 'o': "ipkl", 'p': "ol",
+	'a': "qws", 's': "awed", 'd': "serf", 'f': "drtg", 'g': "ftyh",
+	'h': "gyuj", 'j': "huik", 'k': "jiol", 'l': "kop",
+	'z': "asx", 'x': "zsd", 'c': "xdf", 'v': "cfg", 'b': "vgh",
+	'n': "bhj", 'm': "njk",
+}
+
+// keyboardAdjacent reports whether typo and word differ by exactly one
+// single-character substitution where the differing letters are physically
+// adjacent on a QWERTY keyboard (or are the same letter but a different
+// position was typed). Equal-length words only; any other difference (insert,
+// delete, transpose, multi-char) is not a keyboard slip and returns false.
+func keyboardAdjacent(typo, word string) bool {
+	if len(typo) != len(word) {
+		return false
+	}
+	diff := 0
+	at, aw := byte(0), byte(0)
+	for i := 0; i < len(typo); i++ {
+		if typo[i] != word[i] {
+			diff++
+			at, aw = typo[i], word[i]
+		}
+	}
+	if diff != 1 {
+		return false
+	}
+	neigh, ok := qwertyAdjacency[at]
+	if !ok {
+		return false
+	}
+	for j := 0; j < len(neigh); j++ {
+		if neigh[j] == aw {
+			return true
+		}
+	}
+	return false
 }

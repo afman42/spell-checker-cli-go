@@ -2,13 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// IMPROVED: Assertions are more specific.
+// TestGenerateTextReport verifies the text report content and ordering.
 func TestGenerateTextReport(t *testing.T) {
 	results := map[string][]MisspelledWord{
 		"test.txt": {
@@ -17,7 +18,7 @@ func TestGenerateTextReport(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	generateTextReport(&buf, results)
+	_ = generateTextReport(&buf, results)
 	output := buf.String()
 
 	// Check for the exact, complete output line.
@@ -37,7 +38,7 @@ func TestGenerateTextReportDeterminism(t *testing.T) {
 		"mid.txt":   {{Word: "helo", LineNumber: 1, Column: 1, Suggestions: []string{"hello"}}},
 	}
 	var buf bytes.Buffer
-	generateTextReport(&buf, results)
+	_ = generateTextReport(&buf, results)
 	out := buf.String()
 	// alpha.txt must appear before mid.txt, which must appear before zebra.txt.
 	iAlpha := strings.Index(out, "alpha.txt")
@@ -89,7 +90,7 @@ func TestGenerateHTMLReport(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	generateHTMLReport(&buf, results)
+	_ = generateHTMLReport(&buf, results)
 	output := buf.String()
 
 	if !strings.Contains(output, "<th>Suggestions</th>") {
@@ -106,14 +107,14 @@ func TestGenerateHTMLReport(t *testing.T) {
 func TestGenerateReportNoTypos(t *testing.T) {
 	results := make(map[string][]MisspelledWord)
 	var textBuf bytes.Buffer
-	generateTextReport(&textBuf, results)
+	_ = generateTextReport(&textBuf, results)
 
 	if !strings.Contains(textBuf.String(), "No typos found.") {
 		t.Error("Text report for no typos is incorrect")
 	}
 
 	var htmlBuf bytes.Buffer
-	generateHTMLReport(&htmlBuf, results)
+	_ = generateHTMLReport(&htmlBuf, results)
 	if !strings.Contains(htmlBuf.String(), "No typos found.") {
 		t.Error("HTML report for no typos is incorrect")
 	}
@@ -134,7 +135,7 @@ func TestGenerateHTMLReportEscaping(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	generateHTMLReport(&buf, results)
+	_ = generateHTMLReport(&buf, results)
 	output := buf.String()
 
 	if strings.Contains(output, "<script>") {
@@ -160,7 +161,7 @@ func TestGenerateTextReportNoSuggestions(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	generateTextReport(&buf, results)
+	_ = generateTextReport(&buf, results)
 	out := buf.String()
 
 	if !strings.Contains(out, `- Line 3, Col 2: "zzzz" appears to be a typo.`) {
@@ -336,5 +337,32 @@ func TestGenerateMultiFileHTMLReportEmpty(t *testing.T) {
 	}
 	if !strings.Contains(string(index), "No typos found") {
 		t.Error("expected 'No typos found' in empty index")
+	}
+}
+
+// failingWriter always fails, exercising the report generators' error paths.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("injected write failure") }
+
+// TestGenerateTextReportWriteError verifies a mid-write failure is returned,
+// not silently dropped (previously text reports exited 0 on a truncated
+// write, e.g. disk full).
+func TestGenerateTextReportWriteError(t *testing.T) {
+	results := map[string][]MisspelledWord{
+		"test.txt": {{Word: "errror", LineNumber: 1, Column: 5}},
+	}
+	if err := generateTextReport(failingWriter{}, results); err == nil {
+		t.Fatal("expected write error, got nil")
+	}
+}
+
+// TestGenerateHTMLReportWriteError verifies the same contract for HTML.
+func TestGenerateHTMLReportWriteError(t *testing.T) {
+	results := map[string][]MisspelledWord{
+		"test.txt": {{Word: "errror", LineNumber: 1, Column: 5}},
+	}
+	if err := generateHTMLReport(failingWriter{}, results); err == nil {
+		t.Fatal("expected write error, got nil")
 	}
 }
