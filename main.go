@@ -249,7 +249,7 @@ func writeReport(w io.Writer, results CheckResults, format OutputFormat) error {
 		genErr, kind = generateTextReport(w, results), "text"
 	}
 	if genErr != nil {
-		return fmt.Errorf("Error generating %s report: %w", kind, genErr)
+		return fmt.Errorf("error generating %s report: %w", kind, genErr)
 	}
 	return nil
 }

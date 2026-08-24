@@ -14,10 +14,6 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      matrix:
-        go-version: ["1.24"]
-      fail-fast: false
     steps:
       - name: Check out code
         uses: actions/checkout@v5
@@ -25,7 +21,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version-file: go.mod
           cache: true
 
       - name: Verify Go version
@@ -196,6 +192,10 @@ jobs:
       - name: Test CLI - Stdin functionality
         continue-on-error: true
         run: |
+          # The config-file step above left spellchecker.yaml in the workspace;
+          # its format:html/output keys would hijack this stdin run. Remove it
+          # so stdin defaults to plain-text output the assertion can grep.
+          rm -f spellchecker.yaml
           echo "This is a wondefrul text with some erors" | ./bin/linux_amd64/spellchecker - > ./tmp/stdin-test.txt
           if ! grep -q "wondefrul" ./tmp/stdin-test.txt; then
             echo "Stdin test failed: expected 'wondefrul' not found in output"

@@ -103,7 +103,7 @@ fmt-check:
 
 .PHONY: staticcheck
 staticcheck:
-	go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+	go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 ./...
 
 # -------------------------------------------------------------------
 # Testing

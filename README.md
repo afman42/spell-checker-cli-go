@@ -54,7 +54,7 @@ The dictionary is embedded in the binary — it runs anywhere with no extra file
 
 ### Build from source manually
 
-Requires **Go 1.24+**.
+Requires **Go 1.25.13+** (pinned in go.mod; older toolchains auto-download it).
 
 ```bash
 go build -o spellchecker .
@@ -366,7 +366,7 @@ crash never leaves a half-written file.
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25.13+ (pinned in go.mod)
 - `make` (for the Makefile targets)
 - `upx` (optional, for release binary compression)
 
@@ -387,7 +387,7 @@ crash never leaves a half-written file.
 | `make fmt` | Format all Go source files |
 | `make fmt-check` | Verify all files are `go fmt`-compliant (CI-safe) |
 | `make staticcheck` | Run static analysis |
-| `make bench` | Run compression benchmarks |
+| `make bench` | Run all benchmarks (`-bench=.`, 3 runs) |
 | `make bench-cmp` | Run zstd decompression benchmarks |
 | `make dict` | Regenerate `dictionary.txt.zst` from `dictionary.csv` |
 | `make clean` | Remove build artifacts |
@@ -442,6 +442,7 @@ git commit --no-verify
 ├── dictionary.csv           Source CSV for dictionary generation
 ├── dictionary_bench_test.go Decompression speed benchmarks (zstd)
 ├── optimizer_bench_test.go  Suggestion-path benchmarks (BK search, memo cache)
+├── coverage_extra_test.go   Config/report/watcher/git-diff integration tests
 ├── .githooks/pre-commit     Git pre-commit hook
 ├── test/                    Integration test fixtures
 └── .github/workflows/       CI pipeline
