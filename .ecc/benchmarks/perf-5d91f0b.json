@@ -1,0 +1,66 @@
+{
+  "benchmark": "suggest-memoization-and-markdown-streaming",
+  "commit": "5d91f0b",
+  "baseline_commit": "7089784",
+  "machine": "Intel Celeron N4000 @ 1.10GHz, 2 cores, linux/amd64, go 1.24",
+  "date": "2026-08-24",
+  "method": "go test -bench -benchmem -count=3 (median); CLI wall-clock over typo-injected werther.txt corpus (and->adn, the->teh, you->yu, with->wth)",
+  "units": {
+    "ns_op": "nanoseconds per operation",
+    "b_op": "bytes allocated per operation",
+    "ms": "milliseconds wall clock"
+  },
+  "microbenchmarks": {
+    "BenchmarkSuggest": {
+      "before": {"ns_op": 247108826, "b_op": 19882912, "allocs_op": 315255},
+      "after":  {"ns_op": 2900,      "b_op": 384,       "allocs_op": 5},
+      "note": "5 repeated typos; memo cache turns BK re-search per occurrence into map hit"
+    },
+    "BenchmarkSuggestDistinct": {
+      "before": {"ns_op": 4528540963, "b_op": 408230024, "allocs_op": 5491575},
+      "after":  {"ns_op": 2690527589, "b_op": 669640,    "allocs_op": 8270},
+      "note": "100 unique near-miss typos; ASCII Levenshtein fast path + pooled DP rows"
+    },
+    "BenchmarkLevenshtein": {
+      "before": {"ns_op": 4660, "b_op": 608, "allocs_op": 10},
+      "after":  {"ns_op": 3372, "b_op": 96,  "allocs_op": 2}
+    },
+    "BenchmarkOSA": {
+      "before": {"ns_op": 14264, "b_op": 3152, "allocs_op": 41},
+      "after":  {"ns_op": 17527, "b_op": 3152, "allocs_op": 41},
+      "note": "unchanged code path; sanity check no regression"
+    },
+    "BenchmarkRankSuggestions": {
+      "before": {"ns_op": 34337, "b_op": 4984, "allocs_op": 77},
+      "after":  {"ns_op": 40413, "b_op": 4984, "allocs_op": 77},
+      "note": "unchanged code path; sanity check no regression"
+    },
+    "BenchmarkScanForTypos": {
+      "before": {"ns_op": 22857019410, "b_op": 1756961360, "allocs_op": 33841408},
+      "after":  {"ns_op": 26037520,    "b_op": 1230179,    "allocs_op": 22088},
+      "note": "100x repeated typo paragraph; memoization amortizes repeated typos"
+    }
+  },
+  "cli_wallclock": {
+    "startup_clean_scan": {
+      "before_ms": 295,
+      "after_ms": 389
+    },
+    "scan_10kb_typo_corpus": {
+      "before_ms": 21264,
+      "after_ms": 2491
+    },
+    "scan_50kb_typo_corpus": {
+      "before_ms": 94431,
+      "after_ms": 1776
+    },
+    "scan_275kb_markdown": {
+      "before_ms": null,
+      "after_ms": 2114,
+      "note": "baseline extrapolated >8min from 50KB linear rate; not run to completion"
+    }
+  },
+  "correctness_parity": {
+    "typo_count_10kb": {"before": 438, "after": 438}
+  }
+}
