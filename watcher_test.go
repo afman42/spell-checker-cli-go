@@ -9,16 +9,18 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// captureStdout redirects os.Stdout while fn runs and returns what was written.
-func captureStdout(t *testing.T, fn func()) string {
+// captureStream redirects the given stream global (os.Stdout or os.Stderr)
+// while fn runs and returns what was written. Used only around synchronous
+// calls; redirecting a global under a live goroutine would race.
+func captureStream(t *testing.T, target **os.File, fn func()) string {
 	t.Helper()
-	orig := os.Stdout
+	orig := *target
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	os.Stdout = w
-	defer func() { os.Stdout = orig }()
+	*target = w
+	defer func() { *target = orig }()
 
 	fn()
 
@@ -33,6 +35,10 @@ func captureStdout(t *testing.T, fn func()) string {
 		}
 	}
 	return string(buf)
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	return captureStream(t, &os.Stdout, fn)
 }
 
 // TestProcessBatchReportsTypos verifies a file with a typo prints the word and

@@ -92,15 +92,13 @@ func (cd *ConcurrentDictionary) Suggest(word string) []string {
 		cd.mu.Unlock()
 		return append([]string{}, cached...)
 	}
-	// Build tree under lock (build is serialized), then release so concurrent
-	// workers can search in parallel — the tree is immutable after construction.
-	_ = cd.treeLocked()
+	// Build the tree under the lock (build is serialized); it is immutable
+	// after construction, so the search below runs lock-free across workers.
+	tree := cd.treeLocked()
 	cd.mu.Unlock()
 
 	var sug []string
-	// treeLocked sets cd.bkTree under lock; the tree is immutable after that,
-	// so Search runs lock-free and concurrent workers share the read-only tree.
-	if tree := cd.bkTree; tree != nil {
+	if tree != nil {
 		sug = rankSuggestions(tree.Search(lower, levenshteinThreshold), word)
 	} else {
 		sug = simpleGenerateSuggestions(word, cd.dict)

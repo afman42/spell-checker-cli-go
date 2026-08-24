@@ -115,24 +115,8 @@ func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error
 	// into out verbatim so the rebuilt file is byte-identical.
 	lr := newLineReader(in, maxLineLen)
 	lr.setOverlong(&out)
-	for {
-		line, lineNumber, err := lr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return res, err
-		}
-		// lineReader returns the newline for complete lines; strip it so the
-		// rebuilt file keeps single terminators. Only re-add it when the
-		// source line actually had one — a file with no trailing newline
-		// must not gain one.
-		hadNL := strings.HasSuffix(line, "\n")
-		line = strings.TrimSuffix(line, "\n")
-		out.WriteString(replaceLine(line, lineNumber, repl, &res))
-		if hadNL {
-			out.WriteByte('\n')
-		}
+	if err := rewriteLines(lr, &out, repl, &res); err != nil {
+		return res, err
 	}
 
 	if dryRun || res.Fixes == 0 {
@@ -149,29 +133,41 @@ func fixStdin(r io.Reader, typos []MisspelledWord) (fixed, skipped int, err erro
 	res := FixResult{FilePath: "<stdin>"}
 	repl := buildFixRepl(typos, &res)
 	var out strings.Builder
-	// Mirror fixFile: over-long lines (which the checker skips) must be
-	// streamed into out verbatim, not silently dropped.
 	lr := newLineReader(r, maxLineLen)
 	lr.setOverlong(&out)
-	for {
-		line, lineNumber, err := lr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return 0, 0, err
-		}
-		hadNL := strings.HasSuffix(line, "\n")
-		line = strings.TrimSuffix(line, "\n")
-		out.WriteString(replaceLine(line, lineNumber, repl, &res))
-		if hadNL {
-			out.WriteByte('\n')
-		}
+	if err := rewriteLines(lr, &out, repl, &res); err != nil {
+		return 0, 0, err
 	}
 	if _, err := io.WriteString(os.Stdout, out.String()); err != nil {
 		return 0, 0, err
 	}
 	return res.Fixes, res.Skipped, nil
+}
+
+// rewriteLines streams every line of lr through replaceLine into out. Shared
+// by fixFile and fixStdin so the rebuild rules cannot drift: lines are
+// re-tokenized with the same regex, over-long lines arrive via lr's overlong
+// sink, and trailing newlines are preserved only where the source had them.
+func rewriteLines(lr *lineReader, out *strings.Builder, repl map[fixKey]string, res *FixResult) error {
+	for {
+		line, lineNumber, err := lr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// lineReader returns the newline for complete lines; strip it so the
+		// rebuilt file keeps single terminators. Only re-add it when the
+		// source line actually had one — a file with no trailing newline
+		// must not gain one.
+		hadNL := strings.HasSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\n")
+		out.WriteString(replaceLine(line, lineNumber, repl, res))
+		if hadNL {
+			out.WriteByte('\n')
+		}
+	}
 }
 
 func replaceLine(line string, lineNumber int, repl map[fixKey]string, res *FixResult) string {

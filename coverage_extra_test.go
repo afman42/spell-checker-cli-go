@@ -14,30 +14,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// captureStderr redirects os.Stderr while fn runs and returns what was written.
 func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = w
-	defer func() { os.Stderr = orig }()
-
-	fn()
-
-	w.Close()
-	buf := make([]byte, 0, 4096)
-	tmp := make([]byte, 1024)
-	for {
-		n, err := r.Read(tmp)
-		buf = append(buf, tmp[:n]...)
-		if err != nil {
-			break
-		}
-	}
-	return string(buf)
+	return captureStream(t, &os.Stderr, fn)
 }
 
 // sampleResults builds a small CheckResults shared by the report tests.
