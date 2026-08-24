@@ -1,6 +1,6 @@
 module spell-checker-cli
 
-go 1.24
+go 1.25.13
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
