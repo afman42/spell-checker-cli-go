@@ -16,6 +16,12 @@ func gitDiffFiles(ref string) ([]string, error) {
 	if ref == "" {
 		return nil, fmt.Errorf("git-diff: empty ref")
 	}
+	// A ref starting with "-" would be parsed by git as an option (e.g.
+	// --output=<path> writes a file). Only the CLI user controls ref, but
+	// reject the shape anyway so a ref can never smuggle git flags through.
+	if strings.HasPrefix(ref, "-") {
+		return nil, fmt.Errorf("git-diff: invalid ref %q", ref)
+	}
 	var cmd *exec.Cmd
 	if ref == "staged" {
 		cmd = exec.Command("git", "diff", "--cached", "--name-only", "--diff-filter=ACMR")

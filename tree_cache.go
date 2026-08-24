@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,6 +49,12 @@ func treeCachePath(dict map[string]struct{}) string {
 	return filepath.Join(dir, fmt.Sprintf("bktree-v%d-%s.gob", treeCacheVersion, treeCacheKey(dict)))
 }
 
+// maxTreeCacheBytes caps the on-disk BK-tree cache size. The cache file is
+// keyed by dictionary hash and written by this tool, but it lives in the
+// user's cache dir where another local process could corrupt or replace it; a
+// hostile gob length field must not force a huge allocation during decode.
+const maxTreeCacheBytes = 32 << 20 // 32 MiB
+
 // readBKTreeCacheAt decodes a persisted tree from path.
 func readBKTreeCacheAt(path string) (*BKTree, error) {
 	f, err := os.Open(path)
@@ -56,7 +63,7 @@ func readBKTreeCacheAt(path string) (*BKTree, error) {
 	}
 	defer f.Close()
 	var tree BKTree
-	if err := gob.NewDecoder(f).Decode(&tree); err != nil {
+	if err := gob.NewDecoder(io.LimitReader(f, maxTreeCacheBytes+1)).Decode(&tree); err != nil {
 		return nil, err
 	}
 	return &tree, nil
