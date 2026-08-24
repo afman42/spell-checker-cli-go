@@ -81,7 +81,6 @@ func TestFormatTypoLine(t *testing.T) {
 	}
 }
 
-// IMPROVED: Check for the new "Suggestions" table header.
 func TestGenerateHTMLReport(t *testing.T) {
 	results := map[string][]MisspelledWord{
 		"test.txt": {

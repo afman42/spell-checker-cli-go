@@ -32,11 +32,21 @@ type ConcurrentDictionary struct {
 	dict   map[string]struct{}
 	mu     sync.Mutex
 	bkTree *BKTree
+	// suggestCache memoizes Suggest results per lowercase word. Suggestions
+	// are deterministic for a fixed dictionary, and the same typo typically
+	// recurs many times in a scan (or file). Bounded below; callers only read
+	// the returned slice, never mutate it.
+	suggestCache map[string][]string
 }
 
 // bkTreeMinDictSize is the dictionary size at or above which the BK-tree is
 // used; smaller dictionaries fall back to brute-force generation.
 const bkTreeMinDictSize = 100
+
+// maxSuggestCacheEntries caps the suggestion memo cache. When full, new
+// misses stop being cached — memory stays bounded and behavior is unchanged,
+// only repeated-typo speedups are lost.
+const maxSuggestCacheEntries = 1024
 
 // NewConcurrentDictionary creates a new dictionary wrapper. The BK-tree is not
 // built here: it is deferred until the first Suggest call, so a run that finds
@@ -45,13 +55,10 @@ func NewConcurrentDictionary(dict map[string]struct{}) *ConcurrentDictionary {
 	return &ConcurrentDictionary{dict: dict}
 }
 
-// tree returns the cached BK-tree, building it once on first access and
-// reusing one persisted on disk for identical dictionaries. The build is
-// guarded by the mutex so concurrent Suggest calls from workers can't build it
-// twice.
-func (cd *ConcurrentDictionary) tree() *BKTree {
-	cd.mu.Lock()
-	defer cd.mu.Unlock()
+// treeLocked returns the cached BK-tree, building it once on first access and
+// reusing one persisted on disk for identical dictionaries. Caller must hold
+// cd.mu.
+func (cd *ConcurrentDictionary) treeLocked() *BKTree {
 	if cd.bkTree == nil && len(cd.dict) >= bkTreeMinDictSize {
 		cd.bkTree = loadBKTreeCache(cd.dict)
 		if cd.bkTree == nil {
@@ -69,15 +76,41 @@ func (cd *ConcurrentDictionary) Contains(word string) bool {
 }
 
 // Suggest returns ranked spelling suggestions using the cached BK-tree (fast
-// path) or falls back to brute-force for small dictionaries.
+// path) or falls back to brute-force for small dictionaries. Results are
+// memoized per word: the BK search is deterministic, and repeated occurrences
+// of the same typo (common in real scans) skip the expensive traversal.
 func (cd *ConcurrentDictionary) Suggest(word string) []string {
 	if len(word) > maxSuggestionWordLength {
 		return nil
 	}
-	if tree := cd.tree(); tree != nil {
-		return rankSuggestions(tree.Search(strings.ToLower(word), levenshteinThreshold), word)
+	lower := strings.ToLower(word)
+	cd.mu.Lock()
+	if cd.suggestCache == nil {
+		cd.suggestCache = make(map[string][]string, 16)
 	}
-	return simpleGenerateSuggestions(word, cd.dict)
+	if cached, ok := cd.suggestCache[lower]; ok {
+		cd.mu.Unlock()
+		return append([]string{}, cached...)
+	}
+	// Build tree under lock (build is serialized), then release so concurrent
+	// workers can search in parallel — the tree is immutable after construction.
+	_ = cd.treeLocked()
+	cd.mu.Unlock()
+
+	var sug []string
+	// treeLocked sets cd.bkTree under lock; the tree is immutable after that,
+	// so Search runs lock-free and concurrent workers share the read-only tree.
+	if tree := cd.bkTree; tree != nil {
+		sug = rankSuggestions(tree.Search(lower, levenshteinThreshold), word)
+	} else {
+		sug = simpleGenerateSuggestions(word, cd.dict)
+	}
+	cd.mu.Lock()
+	if len(cd.suggestCache) < maxSuggestCacheEntries {
+		cd.suggestCache[lower] = sug
+	}
+	cd.mu.Unlock()
+	return append([]string{}, sug...)
 }
 
 type MisspelledWord struct {
@@ -87,6 +120,8 @@ type MisspelledWord struct {
 	Suggestions []string
 }
 
+type CheckResults = map[string][]MisspelledWord
+
 type CheckResult struct {
 	FilePath string
 	Typos    []MisspelledWord
@@ -95,7 +130,7 @@ type CheckResult struct {
 
 // runConcurrentCheckerWithDict is the core scanner using an already-built
 // ConcurrentDictionary, so the BK-tree is constructed only once per run.
-func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
+func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (CheckResults, error) {
 	// Phase 1: Collect all file paths (filters applied)
 	allFiles, err := collectFiles(rootPath, excludePatterns, verbose)
 	if err != nil {
@@ -107,9 +142,9 @@ func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDic
 // runCheckerOnFiles runs the worker pool over an already-collected list of
 // files. Shared by the directory walk (runConcurrentCheckerWithDict) and the
 // --git-diff path (runGitDiffChecker), which supplies its own file list.
-func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, verbose bool) (map[string][]MisspelledWord, error) {
+func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, verbose bool) (CheckResults, error) {
 	if len(files) == 0 {
-		return make(map[string][]MisspelledWord), nil
+		return make(CheckResults), nil
 	}
 
 	totalFiles := len(files)
@@ -150,7 +185,7 @@ func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, ver
 		go renderProgressBar(totalFiles, &processed, &errored, progressDone)
 	}
 
-	allTypos := make(map[string][]MisspelledWord)
+	allTypos := make(CheckResults)
 	var errs []error
 	for result := range results {
 		processed.Add(1)
@@ -181,13 +216,14 @@ func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, ver
 // (--git-diff). The ref is resolved by gitDiffFiles; the resulting file list is
 // filtered by the same exclude + binary rules as a directory walk so ignored
 // or binary files are still skipped. Runs the same worker pool as the walk.
-func runGitDiffChecker(ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (map[string][]MisspelledWord, error) {
+func runGitDiffChecker(ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (CheckResults, error) {
 	raw, err := gitDiffFiles(ref)
 	if err != nil {
 		return nil, fmt.Errorf("git-diff: %w", err)
 	}
-	// only checks files under sub/.  Normalize both sides to use forward
-	// slashes and trim trailing slashes for a clean prefix match.
+	// Restrict git-diff results to rootPath: normalize both sides to
+	// forward slashes and clean them (dropping any trailing slash) for a
+	// clean exact-or-prefix match.
 	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
 	if rootPath != "." {
 		filtered := raw[:0]
@@ -202,33 +238,27 @@ func runGitDiffChecker(ref string, rootPath string, concurrentDict *ConcurrentDi
 	patterns := mergeDefaultExcludes(excludePatterns)
 	var files []string
 	for _, p := range raw {
-		exclude, err := shouldExclude(p, patterns)
-		if err != nil {
+		gate, err := classifyFile(p, patterns)
+		switch gate {
+		case fileExcludeErr:
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", p, err)
 			}
-			continue
-		}
-		if exclude {
+		case fileExcluded:
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Skipping excluded file: %s\n", p)
 			}
-			continue
-		}
-		isBinary, err := isLikelyBinary(p)
-		if err != nil {
+		case fileBinaryErr:
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", p, err)
 			}
-			continue
-		}
-		if isBinary {
+		case fileBinary:
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", p)
 			}
-			continue
+		default:
+			files = append(files, p)
 		}
-		files = append(files, p)
 	}
 	if verbose {
 		fmt.Fprintf(os.Stderr, "git-diff: %d file(s) to check\n", len(files))
@@ -293,31 +323,23 @@ func collectFiles(rootPath string, excludePatterns []string, verbose bool) ([]st
 			return nil
 		}
 
-		exclude, err := shouldExclude(path, patterns)
-		if err != nil {
+		gate, err := classifyFile(path, patterns)
+		switch gate {
+		case fileExcludeErr:
 			fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", path, err)
-			return nil
-		}
-		if exclude {
+		case fileExcluded:
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Skipping excluded file: %s\n", path)
 			}
-			return nil
-		}
-
-		isBinary, err := isLikelyBinary(path)
-		if err != nil {
+		case fileBinaryErr:
 			fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", path, err)
-			return nil
-		}
-		if isBinary {
+		case fileBinary:
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", path)
 			}
-			return nil
+		default:
+			files = append(files, path)
 		}
-
-		files = append(files, path)
 		return nil
 	})
 	return files, err
@@ -389,14 +411,25 @@ func checkFile(filePath string, dictionary *ConcurrentDictionary) ([]MisspelledW
 
 	// Markdown-aware scanning: strip fenced code, inline code, link URLs and
 	// YAML frontmatter before tokenizing so prose is checked, code isn't.
-	// Inexpensive (one read) on typically-small .md files; non-markdown paths
-	// keep the streaming lineReader to stay within maxLineLen memory.
-	if scanOpts.Markdown && isMarkdownExt(filePath) {
-		raw, err := io.ReadAll(file)
-		if err != nil {
-			return nil, fmt.Errorf("failed reading %s: %w", filePath, err)
+	// Streamed through the same bounded lineReader as plain text (1 MiB line
+	// cap), so a huge .md file cannot OOM the process.
+	if isMarkdownExt(filePath) {
+		lr := newLineReader(file, maxLineLen)
+		var st mdState
+		var misspelled []MisspelledWord
+		for {
+			line, lineNumber, err := lr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed scanning %s: %w", filePath, err)
+			}
+			if l := scanMarkdownLine(strings.TrimRight(line, "\r\n"), lineNumber, &st); l != "" {
+				misspelled = scanLineForTypos(l, lineNumber, dictionary, misspelled)
+			}
 		}
-		return scanLinesForTypos(scanMarkdownLines(raw), dictionary)
+		return misspelled, nil
 	}
 
 	misspelledWords, err := scanForTypos(file, dictionary)
@@ -420,12 +453,10 @@ func isMarkdownExt(filePath string) bool {
 type scanOptions struct {
 	// MinWordLength skips tokens shorter than this. 0 = check all.
 	MinWordLength int
-	// Markdown strips code fences/URLs/frontmatter when true.
-	Markdown bool
 }
 
 // scanOpts is the active scan configuration, set by run() before scanning.
-var scanOpts = scanOptions{Markdown: true}
+var scanOpts = scanOptions{}
 
 // scanForTypos reads a stream line by line and returns misspelled words with
 // 1-based line and (rune) column positions.
@@ -529,14 +560,15 @@ nextLine:
 }
 
 // scanLineForTypos appends the misspelled words found in a single line to
-// misspelled and returns the extended slice. Shared by the streaming
-// (scanForTypos) and markdown (scanLinesForTypos) paths so the
-// tokenize/filter/report loop exists in exactly one place.
+// misspelled and returns the extended slice. Its sole consumer is the
+// streaming scanner scanForTypos, so the tokenize/filter/report loop exists
+// in exactly one place.
 func scanLineForTypos(line string, lineNumber int, dictionary *ConcurrentDictionary, misspelled []MisspelledWord) []MisspelledWord {
 	for _, indices := range wordRegex.FindAllStringIndex(line, -1) {
 		word := line[indices[0]:indices[1]]
 		// Skip tokens that are fragments of identifiers (adjacent to a digit
-		// or underscore, e.g. "Mi03x_er" splitting into "Mi"/"er" or "10px"
+		// or underscore, e.g. "Mi03x_er" splitting into "Mi"/"er", or the
+		// "px" in "10px"); see isIdentifierFragment for details.
 		if isIdentifierFragment(line, indices[0], indices[1]) {
 			continue
 		}
@@ -567,22 +599,6 @@ func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWo
 			return nil, err
 		}
 		misspelledWords = scanLineForTypos(line, lineNumber, dictionary, misspelledWords)
-	}
-	return misspelledWords, nil
-}
-
-// scanLinesForTypos tokenizes an already-filtered slice of lines (one entry
-// per source line, empty for skipped lines).  Line numbers are 1-based and
-// derived from the slice index, so markdown code-fence/frontmatter stripping
-// (which blanks skipped lines rather than deleting them) keeps column/line
-// positions accurate against the original file.
-func scanLinesForTypos(lines []string, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
-	var misspelledWords []MisspelledWord
-	for i, line := range lines {
-		if line == "" {
-			continue
-		}
-		misspelledWords = scanLineForTypos(line, i+1, dictionary, misspelledWords)
 	}
 	return misspelledWords, nil
 }
@@ -720,7 +736,39 @@ func isLikelyBinary(filePath string) (bool, error) {
 	return controls > 3, nil
 }
 
-// checkStdin processes text input from stdin
+// fileGate classifies the outcome of the shared exclude + binary checks so
+// every scanner entry point filters files through one implementation.
+type fileGate int
+
+const (
+	fileOK         fileGate = iota // file passed both checks and should be scanned
+	fileExcludeErr                 // exclude-pattern match failed
+	fileExcluded                   // file matched an exclude pattern
+	fileBinaryErr                  // binary sniff failed
+	fileBinary                     // file looks binary
+)
+
+// classifyFile applies the exclude patterns and the binary sniff to path.
+// It performs no output; each caller keeps its own stderr policy per gate,
+// so wording and verbose gating stay exactly where they belong.
+func classifyFile(path string, patterns []string) (fileGate, error) {
+	excluded, err := shouldExclude(path, patterns)
+	if err != nil {
+		return fileExcludeErr, err
+	}
+	if excluded {
+		return fileExcluded, nil
+	}
+	isBinary, err := isLikelyBinary(path)
+	if err != nil {
+		return fileBinaryErr, err
+	}
+	if isBinary {
+		return fileBinary, nil
+	}
+	return fileOK, nil
+}
+
 func checkStdin(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
 	misspelledWords, err := scanForTypos(r, dictionary)
 	if err != nil {

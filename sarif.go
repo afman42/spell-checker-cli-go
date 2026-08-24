@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+const sarifTypoRuleID = "spellcheck/typo"
+
 // SARIF (Static Analysis Results Interchange Format) is the standard format
 // ingested by GitHub Code Scanning.  The schema below follows SARIF v2.1.0
 // (the version GitHub expects).  Only the fields we populate are kept; the
@@ -75,7 +77,7 @@ type sarifRegion struct {
 // generateSARIFReport writes a SARIF v2.1.0 report. Files are sorted by path
 // for deterministic output (same contract as generateJSONReport).  Each typo
 // becomes one result, level "warning", rule "spellcheck/typo".
-func generateSARIFReport(writer io.Writer, results map[string][]MisspelledWord) error {
+func generateSARIFReport(writer io.Writer, results CheckResults) error {
 	paths := sortedResultPaths(results)
 
 	sarifResults := []sarifResult{}
@@ -83,7 +85,7 @@ func generateSARIFReport(writer io.Writer, results map[string][]MisspelledWord) 
 		for _, m := range results[p] {
 			msg := typoMessage(m.Word, strings.Join(m.Suggestions, ", "))
 			sarifResults = append(sarifResults, sarifResult{
-				RuleID:  "spellcheck/typo",
+				RuleID:  sarifTypoRuleID,
 				Level:   "warning",
 				Message: sarifMessage{Text: msg},
 				Locations: []sarifLocation{
@@ -117,7 +119,7 @@ func generateSARIFReport(writer io.Writer, results map[string][]MisspelledWord) 
 					Version:        versionString,
 					InformationURI: "https://github.com/afman42/spell-checker-cli-go",
 					Rules: []sarifReportingRule{{
-						ID:               "spellcheck/typo",
+						ID:               sarifTypoRuleID,
 						Name:             "Typo",
 						ShortDescription: sarifMessage{Text: "A word not found in the dictionary."},
 					}},

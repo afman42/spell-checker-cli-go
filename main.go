@@ -101,6 +101,20 @@ func findConfigFile(dirs []string) string {
 	return ""
 }
 
+// loadYAMLConfig reads and parses a spellchecker YAML config file into a
+// fresh Config.
+func loadYAMLConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("error reading config file %q: %w", path, err)
+	}
+	cfg := &Config{}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("error parsing config file %q: %w", path, err)
+	}
+	return cfg, nil
+}
+
 // Exit codes: 0 = clean, 1 = typos found (or fixincomplete), 2 = usage/config/
 // internal error. 1 vs 2 lets CI distinguish "spelling problems" from "couldn't
 // run".
@@ -109,6 +123,8 @@ const (
 	exitTypos = 1
 	exitError = 2
 )
+
+const stdinKey = "<stdin>"
 
 // loadConfig parses flags from args, merges them over any spellchecker.yaml,
 // validates the result, and returns the config plus leftover positional args.
@@ -139,24 +155,19 @@ func loadConfig(args []string) (*Config, []string, error) {
 	// --- Load Config File (YAML) ---
 	cfg := &Config{}
 	if path := findConfigFile(configSearchDirs()); path != "" {
-		data, err := os.ReadFile(path)
+		loaded, err := loadYAMLConfig(path)
 		if err != nil {
-			return nil, nil, fmt.Errorf("error reading config file: %w", err)
+			return nil, nil, err
 		}
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, nil, fmt.Errorf("error parsing config file: %w", err)
-		}
+		cfg = loaded
 	}
 	// --- Apply explicit --config override (replaces auto-discovered cfg) ---
 	if fs.Lookup("config").Changed && *configFlag != "" {
-		cfg = &Config{}
-		data, err := os.ReadFile(*configFlag)
+		loaded, err := loadYAMLConfig(*configFlag)
 		if err != nil {
-			return nil, nil, fmt.Errorf("error reading config file %s: %w", *configFlag, err)
+			return nil, nil, err
 		}
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, nil, fmt.Errorf("error parsing config file %s: %w", *configFlag, err)
-		}
+		cfg = loaded
 	}
 
 	// Only override when the flag was explicitly set on the command line.
@@ -219,6 +230,30 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
+// writeReport renders results in the given format to w. HTML is only selected
+// when the caller resolves it explicitly (file output); any other format,
+// including unknown values, falls back to the plain-text report.
+func writeReport(w io.Writer, results CheckResults, format OutputFormat) error {
+	var (
+		genErr error
+		kind   string
+	)
+	switch format {
+	case FormatHTML:
+		genErr, kind = generateHTMLReport(w, results), "HTML"
+	case FormatJSON:
+		genErr, kind = generateJSONReport(w, results), "JSON"
+	case FormatSarif:
+		genErr, kind = generateSARIFReport(w, results), "SARIF"
+	default:
+		genErr, kind = generateTextReport(w, results), "text"
+	}
+	if genErr != nil {
+		return fmt.Errorf("Error generating %s report: %w", kind, genErr)
+	}
+	return nil
+}
+
 // run executes the CLI with the given arguments and returns the exit code.
 func run(args []string) int {
 	// --- Load Configuration ---
@@ -248,9 +283,8 @@ func run(args []string) int {
 			}()
 		}
 	}
-	// Active scan configuration, read inside scanForTypos/scanLinesForTypos.
+	// Active scan configuration, read inside scanForTypos.
 	scanOpts.MinWordLength = cfg.MinWordLength
-	scanOpts.Markdown = true // code-fence/URL/frontmatter stripping is cheap and always safe
 
 	dictionary, err := loadDictionary(cfg.Dictionary)
 	if err != nil {
@@ -286,8 +320,13 @@ func run(args []string) int {
 	path := positionals[0]
 
 	// .spellignore: auto-loaded exclude patterns (one glob per line, # comments)
-	// merged with --exclude and built-in excludes before scanning.
+	// merged with --exclude and built-in excludes before scanning. The cwd file
+	// always applies; when the target is a directory, its own .spellignore is
+	// loaded too so a scanned tree can carry its exclusions.
 	cfg.Exclude = append(cfg.Exclude, loadSpellignore(".")...)
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		cfg.Exclude = append(cfg.Exclude, loadSpellignore(path)...)
+	}
 
 	// Watch mode: stay running and re-check files on change
 	if cfg.Watch {
@@ -311,7 +350,7 @@ func run(args []string) int {
 		return exitOK
 	}
 
-	var allTypos map[string][]MisspelledWord
+	var allTypos CheckResults
 	var checkErr error
 	var stdinData []byte
 	if path == "-" {
@@ -328,9 +367,9 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "Error processing stdin: %v\n", err)
 			return exitError
 		}
-		allTypos = map[string][]MisspelledWord{}
+		allTypos = CheckResults{}
 		if len(typos) > 0 {
-			allTypos["<stdin>"] = typos
+			allTypos[stdinKey] = typos
 		}
 	} else {
 		// Process file or directory, or the git-changed file set when
@@ -368,7 +407,7 @@ func run(args []string) int {
 		var skipped, err = 0, error(nil)
 		if path == "-" {
 			// Apply fixes to piped stdin, writing corrected stream to stdout.
-			_, skipped, err = fixStdin(bytes.NewReader(stdinData), allTypos["<stdin>"])
+			_, skipped, err = fixStdin(bytes.NewReader(stdinData), allTypos[stdinKey])
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error fixing stdin: %v\n", err)
 				return exitError
@@ -397,24 +436,16 @@ func run(args []string) int {
 	// the warning above is the report; don't emit a misleading "No typos found".
 	if len(allTypos) > 0 || checkErr == nil {
 		if cfg.Output == "" {
-			// Default case: no output path. Print to stdout in the chosen format
-			// (text unless --format json was requested).
-			switch cfg.Format {
-			case FormatJSON:
-				if err := generateJSONReport(os.Stdout, allTypos); err != nil {
-					fmt.Fprintf(os.Stderr, "Error generating JSON report: %v\n", err)
-					return exitError
-				}
-			case FormatSarif:
-				if err := generateSARIFReport(os.Stdout, allTypos); err != nil {
-					fmt.Fprintf(os.Stderr, "Error generating SARIF report: %v\n", err)
-					return exitError
-				}
-			default:
-				if err := generateTextReport(os.Stdout, allTypos); err != nil {
-					fmt.Fprintf(os.Stderr, "Error generating text report: %v\n", err)
-					return exitError
-				}
+			// Default case: no output path. Print to stdout in the chosen
+			// format. Quirk: --format html without --output still prints
+			// plain text; HTML is only produced when writing a file.
+			stdoutFmt := cfg.Format
+			if stdoutFmt == FormatHTML {
+				stdoutFmt = FormatAuto
+			}
+			if err := writeReport(os.Stdout, allTypos, stdoutFmt); err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
+				return exitError
 			}
 		} else {
 			// An output path was provided. Determine the format and mode.
@@ -438,6 +469,8 @@ func run(args []string) int {
 				}
 			} else {
 				// Single-file output for text, JSON, or a specific HTML file.
+				// Extension-based auto-detection (FormatAuto) applies only
+				// here, when an output path was given.
 				file, err := os.Create(cfg.Output)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
@@ -445,33 +478,24 @@ func run(args []string) int {
 				}
 
 				fmt.Printf("Report will be saved to: %s\n", cfg.Output)
+				outFmt := FormatAuto
 				switch {
 				case isHTML:
-					if err := generateHTMLReport(file, allTypos); err != nil {
-						fmt.Fprintf(os.Stderr, "Error generating HTML report: %v\n", err)
-						file.Close()
-						return exitError
-					}
+					outFmt = FormatHTML
 				case isJSON:
-					if err := generateJSONReport(file, allTypos); err != nil {
-						fmt.Fprintf(os.Stderr, "Error generating JSON report: %v\n", err)
-						file.Close()
-						return exitError
-					}
+					outFmt = FormatJSON
 				case isSARIF:
-					if err := generateSARIFReport(file, allTypos); err != nil {
-						fmt.Fprintf(os.Stderr, "Error generating SARIF report: %v\n", err)
-						file.Close()
-						return exitError
-					}
-				default:
-					if err := generateTextReport(file, allTypos); err != nil {
-						fmt.Fprintf(os.Stderr, "Error generating text report: %v\n", err)
-						file.Close()
-						return exitError
-					}
+					outFmt = FormatSarif
 				}
-				file.Close()
+				if err := writeReport(file, allTypos, outFmt); err != nil {
+					fmt.Fprintf(os.Stderr, "%v\n", err)
+					file.Close()
+					return exitError
+				}
+				if cerr := file.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "Error closing output file %s: %v\n", cfg.Output, cerr)
+					return exitError
+				}
 			}
 		}
 	}

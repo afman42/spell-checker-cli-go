@@ -51,7 +51,7 @@ func TestProcessBatchReportsTypos(t *testing.T) {
 	cd := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
 
 	out := captureStdout(t, func() {
-		processBatch(map[string]struct{}{typoFile: {}}, cd)
+		processBatch(map[string]struct{}{typoFile: {}}, cd, os.Stdout)
 	})
 	if !strings.Contains(out, "wrld") {
 		t.Errorf("expected typo word in output, got:\n%s", out)
@@ -61,7 +61,7 @@ func TestProcessBatchReportsTypos(t *testing.T) {
 	}
 
 	out = captureStdout(t, func() {
-		processBatch(map[string]struct{}{cleanFile: {}}, cd)
+		processBatch(map[string]struct{}{cleanFile: {}}, cd, os.Stdout)
 	})
 	if !strings.Contains(out, "no typos") {
 		t.Errorf("expected 'no typos' for clean file, got:\n%s", out)
@@ -79,7 +79,7 @@ func TestProcessBatchTypoNoSuggestion(t *testing.T) {
 	cd := NewConcurrentDictionary(map[string]struct{}{"completely": {}, "different": {}})
 
 	out := captureStdout(t, func() {
-		processBatch(map[string]struct{}{path: {}}, cd)
+		processBatch(map[string]struct{}{path: {}}, cd, os.Stdout)
 	})
 	if !strings.Contains(out, "appears to be a typo") {
 		t.Errorf("expected typo report, got:\n%s", out)
@@ -93,7 +93,7 @@ func TestProcessBatchTypoNoSuggestion(t *testing.T) {
 func TestProcessBatchEmptySet(t *testing.T) {
 	cd := NewConcurrentDictionary(map[string]struct{}{"hello": {}})
 	out := captureStdout(t, func() {
-		processBatch(map[string]struct{}{}, cd)
+		processBatch(map[string]struct{}{}, cd, os.Stdout)
 	})
 	if strings.TrimSpace(out) != "" {
 		t.Errorf("expected no output for empty batch, got:\n%s", out)

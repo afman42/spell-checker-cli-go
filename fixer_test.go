@@ -228,6 +228,52 @@ func TestFixFilePreservesHugeLine(t *testing.T) {
 	}
 }
 
+// TestFixStdinPreservesHugeLine verifies an over-long stdin line (which the
+// checker skips) survives verbatim in the fixed output while normal typos on
+// other lines are still replaced. Regression: fixStdin once dropped over-long
+// lines entirely because it never installed the lineReader's overlong sink.
+func TestFixStdinPreservesHugeLine(t *testing.T) {
+	huge := strings.Repeat("x", maxLineLen+10)
+	input := "hello wrld\n" + huge + "\ndone wrld\n"
+
+	dict := map[string]struct{}{"hello": {}, "world": {}, "done": {}}
+	typos, err := scanForTypos(strings.NewReader(input), NewConcurrentDictionary(dict))
+	if err != nil {
+		t.Fatalf("scanForTypos: %v", err)
+	}
+	if len(typos) != 2 {
+		t.Fatalf("expected 2 typos (huge line skipped), got %d: %v", len(typos), typos)
+	}
+
+	// fixStdin writes to os.Stdout; point it at a temp file so the ~1 MiB
+	// output can be read back without a pipe-buffer deadlock.
+	outPath := filepath.Join(t.TempDir(), "stdout")
+	f, err := os.Create(outPath)
+	if err != nil {
+		t.Fatalf("create stdout capture: %v", err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = f
+	fixed, skipped, err := fixStdin(strings.NewReader(input), typos)
+	os.Stdout = oldStdout
+	f.Close()
+	if err != nil {
+		t.Fatalf("fixStdin: %v", err)
+	}
+	if fixed != 2 || skipped != 0 {
+		t.Errorf("fixed=%d skipped=%d, want 2 fixed, 0 skipped", fixed, skipped)
+	}
+
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	want := "hello world\n" + huge + "\ndone world\n"
+	if string(got) != want {
+		t.Errorf("huge line not preserved verbatim:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}
+
 func containsAll(s string, subs []string) bool {
 	for _, sub := range subs {
 		found := false
@@ -270,8 +316,6 @@ func TestFixFilePreservesInlineCode(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	// Markdown stripping is on by default in scanOpts; set it for this test.
-	scanOpts.Markdown = true
 	typos := detectTypos(t, path, dict)
 	// The checker should flag only the prose "teh", not the one in code.
 	if len(typos) != 1 {
@@ -305,8 +349,6 @@ func TestFixFilePreservesIdentifierFragment(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	scanOpts.Markdown = false
-	defer func() { scanOpts.Markdown = true }() // restore package default
 	typos := detectTypos(t, path, dict)
 	// Only the standalone "teh" should be flagged, not "teh" in "teh_var".
 	// wordRegex splits "teh_var" into "teh" and "var"; isIdentifierFragment
@@ -325,5 +367,30 @@ func TestFixFilePreservesIdentifierFragment(t *testing.T) {
 	want := "the cat and teh_var are different.\n"
 	if string(got) != want {
 		t.Errorf("identifier fragment corrupted:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}
+
+// TestFixFilePreservesMissingTrailingNewline verifies a file without a final
+// newline does not gain one when a typo is fixed (byte-exact round-trip for
+// the untouched tail of the file).
+func TestFixFilePreservesMissingTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "doc.txt")
+	original := "hello wrld" // no trailing newline
+	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	dict := map[string]struct{}{"hello": {}, "world": {}}
+	typos := detectTypos(t, path, dict)
+
+	if _, err := fixFile(path, typos, false); err != nil {
+		t.Fatalf("fixFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "hello world" {
+		t.Errorf("trailing newline added: got %q, want %q", string(got), "hello world")
 	}
 }

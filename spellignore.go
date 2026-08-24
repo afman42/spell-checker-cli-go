@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +17,11 @@ func loadSpellignore(cwd string) []string {
 	path := filepath.Join(cwd, ".spellignore")
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// A missing file is normal; anything else (permissions,
+			// corruption) must not silently drop user exclusions.
+			fmt.Fprintf(os.Stderr, "Warning: could not read .spellignore: %v\n", err)
+		}
 		return nil
 	}
 	var patterns []string

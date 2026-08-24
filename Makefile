@@ -8,8 +8,8 @@
 #   test          Run all tests
 #   test-race     Run all tests with the race detector
 #   test-short    Run only short tests (skips benchmarks)
-#   bench         Run compression benchmarks
-#   bench-cmp     Run and compare gzip-vs-zstd benchmarks
+#   bench         Run all benchmarks (-bench=.) against the zstd dictionary
+#   bench-cmp     Compare zstd decompression benchmarks (load vs raw)
 #   vet           Run go vet ./...
 #   fmt           Format all Go source files
 #   dict          Regenerate the embedded dictionary from dictionary.csv

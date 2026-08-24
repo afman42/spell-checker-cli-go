@@ -168,6 +168,7 @@ file is scanned normally. A single pathological line never fails the file.
 
 # Run quietly in CI: only the exit code matters
 ./spellchecker --quiet ./src/
+```
 
 ### Config file
 
@@ -191,9 +192,11 @@ through to the config file, then to defaults.
 
 #### `.spellignore`
 
-A `.spellignore` file in the working directory holds one glob pattern per line
-(`#` comments and blank lines ignored). Its patterns are merged with `--exclude`
-and the built-in excludes, so you don't need to repeat them on every run:
+A `.spellignore` file holds one glob pattern per line (`#` comments and blank
+lines ignored). The working directory's `.spellignore` always applies; when the
+target is a directory, its own `.spellignore` is loaded too, so a scanned tree
+can carry its exclusions. Patterns are merged with `--exclude` and the built-in
+excludes, so you don't need to repeat them on every run:
 
 ```
 # .spellignore
@@ -372,7 +375,7 @@ crash never leaves a half-written file.
 | Target | Description |
 |--------|-------------|
 | `make` / `make all` | Build + test |
-| `make build` | Optimized binary (stripped, static, no CGO, ~5.3 MB) |
+| `make build` | Optimized binary (stripped, static, no CGO, ~4.1 MB) |
 | `make build-cross` | Cross-compile: `make build-cross GOOS=linux GOARCH=arm64` |
 | `make release` | Build + UPX compression (auto-detects `upx`) |
 | `make setup` | Activate the pre-commit hook (`git config core.hooksPath .githooks`) |
@@ -438,6 +441,7 @@ git commit --no-verify
 ├── dictionary.txt.zst       Embedded word list (zstd-compressed, 324 KB)
 ├── dictionary.csv           Source CSV for dictionary generation
 ├── dictionary_bench_test.go Decompression speed benchmarks (zstd)
+├── optimizer_bench_test.go  Suggestion-path benchmarks (BK search, memo cache)
 ├── .githooks/pre-commit     Git pre-commit hook
 ├── test/                    Integration test fixtures
 └── .github/workflows/       CI pipeline

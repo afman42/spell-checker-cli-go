@@ -3,6 +3,7 @@ package main
 import (
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -281,6 +282,13 @@ func levenshteinDistance(a, b string) int {
 		return len(b)
 	}
 
+	// Fast path: pure-ASCII strings index byte == rune, so the DP runs on raw
+	// bytes with stack rows — zero heap allocation. Dictionary words and the
+	// vast majority of typos are ASCII; the rune path below handles multibyte.
+	if isASCII(a) && isASCII(b) {
+		return levenshteinASCII(a, b)
+	}
+
 	runesA := []rune(a)
 	runesB := []rune(b)
 	lenA, lenB := len(runesA), len(runesB)
@@ -311,6 +319,64 @@ func levenshteinDistance(a, b string) int {
 		prev, cur = cur, prev
 	}
 	return prev[lenB]
+}
+
+// levRowPool hands out single DP rows reused across levenshtein calls so the
+// hot BK-tree search path allocates nothing per node visit. Rows are capped at
+// maxSuggestionWordLength+1 ints (the length guard above ensures no call needs
+// more). Buffers are returned full-length so every Get can slice [:lenB+1].
+var levRowPool = sync.Pool{New: func() any {
+	row := make([]int, maxSuggestionWordLength+1)
+	return &row
+}}
+
+// levenshteinASCII is the byte-oriented variant of levenshteinDistance for
+// pure-ASCII inputs, where each byte is one rune. It uses a single in-place DP
+// row (the classic diagonal-carrying variant) drawn from levRowPool, so the
+// per-call heap cost is zero and the inner loop touches one cache-hot row.
+func levenshteinASCII(a, b string) int {
+	lenA, lenB := len(a), len(b)
+	if lenA == 0 {
+		return lenB
+	}
+	if lenB == 0 {
+		return lenA
+	}
+	rowp := levRowPool.Get().(*[]int)
+	row := (*rowp)[:lenB+1]
+	for j := 0; j <= lenB; j++ {
+		row[j] = j
+	}
+	for i := 1; i <= lenA; i++ {
+		prevDiag := row[0] // prev[j-1] for the first column
+		row[0] = i
+		ai := a[i-1]
+		for j := 1; j <= lenB; j++ {
+			cost := 0
+			if ai != b[j-1] {
+				cost = 1
+			}
+			old := row[j] // prev[j]
+			// row[j] is prev[j] before the update, row[j-1] is cur[j-1]
+			row[j] = min(old+1, row[j-1]+1, prevDiag+cost)
+			prevDiag = old
+		}
+	}
+	res := row[lenB]
+	*rowp = (*rowp)[:cap(*rowp)]
+	levRowPool.Put(rowp)
+	return res
+}
+
+// isASCII reports whether every byte in s is below 0x80 (pure ASCII), so byte
+// indexing and rune indexing are interchangeable.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // qwertyAdjacency maps a lowercase letter to the set of letters adjacent to it

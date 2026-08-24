@@ -35,7 +35,7 @@ type fixKey struct {
 // Returns the total number of fixed and skipped typos so callers (e.g. main)
 // can decide an exit code: a real fix that leaves skipped typos behind still
 // counts as "typos remain" and should fail CI.
-func runFixer(results map[string][]MisspelledWord, dryRun bool) (totalFixed, totalSkipped int, err error) {
+func runFixer(results CheckResults, dryRun bool) (totalFixed, totalSkipped int, err error) {
 	if len(results) == 0 {
 		fmt.Println("No typos to fix.")
 		return 0, 0, nil
@@ -124,10 +124,15 @@ func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error
 			return res, err
 		}
 		// lineReader returns the newline for complete lines; strip it so the
-		// rebuilt file keeps single terminators.
+		// rebuilt file keeps single terminators. Only re-add it when the
+		// source line actually had one — a file with no trailing newline
+		// must not gain one.
+		hadNL := strings.HasSuffix(line, "\n")
 		line = strings.TrimSuffix(line, "\n")
 		out.WriteString(replaceLine(line, lineNumber, repl, &res))
-		out.WriteByte('\n')
+		if hadNL {
+			out.WriteByte('\n')
+		}
 	}
 
 	if dryRun || res.Fixes == 0 {
@@ -143,8 +148,11 @@ func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error
 func fixStdin(r io.Reader, typos []MisspelledWord) (fixed, skipped int, err error) {
 	res := FixResult{FilePath: "<stdin>"}
 	repl := buildFixRepl(typos, &res)
-	lr := newLineReader(r, maxLineLen)
 	var out strings.Builder
+	// Mirror fixFile: over-long lines (which the checker skips) must be
+	// streamed into out verbatim, not silently dropped.
+	lr := newLineReader(r, maxLineLen)
+	lr.setOverlong(&out)
 	for {
 		line, lineNumber, err := lr.Next()
 		if err == io.EOF {
@@ -153,9 +161,12 @@ func fixStdin(r io.Reader, typos []MisspelledWord) (fixed, skipped int, err erro
 		if err != nil {
 			return 0, 0, err
 		}
+		hadNL := strings.HasSuffix(line, "\n")
 		line = strings.TrimSuffix(line, "\n")
 		out.WriteString(replaceLine(line, lineNumber, repl, &res))
-		out.WriteByte('\n')
+		if hadNL {
+			out.WriteByte('\n')
+		}
 	}
 	if _, err := io.WriteString(os.Stdout, out.String()); err != nil {
 		return 0, 0, err
@@ -206,10 +217,14 @@ func matchCase(typo, suggestion string) string {
 	return suggestion
 }
 
-// writeAtomic writes content to a temp file in the same directory, then renames
-// it over the target so readers never see a partial write. The temp file is
-// fsynced before the rename so a crash doesn't leave a renamed-but-empty file.
-func writeAtomic(path, content string) error {
+// writeFileAtomic writes content to a temp file in the target's directory,
+// fsyncs it, closes it, then renames it over path so readers never see a
+// partial write; the temp file is removed if any step fails. When
+// preserveMode is true the existing target's permission bits are copied onto
+// the replacement — a stat failure there propagates instead of silently
+// skipping the chmod. After a successful rename the parent directory is
+// fsynced best-effort so the rename itself is durable.
+func writeFileAtomic(path, content string, preserveMode bool) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".spellfix-*")
 	if err != nil {
@@ -233,8 +248,11 @@ func writeAtomic(path, content string) error {
 		return err
 	}
 
-	// Preserve original permissions where possible.
-	if info, err := os.Stat(path); err == nil {
+	if preserveMode {
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
 		if err := os.Chmod(tmpName, info.Mode()); err != nil {
 			return err
 		}
@@ -242,11 +260,17 @@ func writeAtomic(path, content string) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	// Best-effort directory sync so the rename itself is durable: on a sudden
-	// power loss the fsynced data could otherwise be lost with the rename.
 	if dirFile, err := os.Open(dir); err == nil {
 		_ = dirFile.Sync()
 		dirFile.Close()
 	}
 	return nil
+}
+
+// writeAtomic writes content to a temp file in the same directory, then renames
+// it over the target so readers never see a partial write. The temp file is
+// fsynced before the rename so a crash doesn't leave a renamed-but-empty file,
+// and the original file's permissions are preserved.
+func writeAtomic(path, content string) error {
+	return writeFileAtomic(path, content, true)
 }

@@ -63,7 +63,6 @@ func TestShouldExclude(t *testing.T) {
 	}
 }
 
-// REWRITTEN: TestCheckFile is now a table-driven test for better coverage and readability.
 func TestCheckFile(t *testing.T) {
 	// A common dictionary for all test cases.
 	mockDictionary := map[string]struct{}{
@@ -645,23 +644,15 @@ func TestCollectFilesDefaultExcludes(t *testing.T) {
 	}
 }
 
-// TestScanLinesForTypos verifies the standalone line-scanner: blank lines
-// skipped, in-dictionary words ignored, correct 1-based line and column
-// numbers, identifier fragments skipped, and suggestions populated for a
-// near-miss word. This exercises scanLinesForTypos directly (it is only
-// reached via the untested git-diff/stdin paths otherwise).
+// TestScanLinesForTypos verifies the streaming scanner scanForTypos: blank
+// lines skipped, in-dictionary words ignored, correct 1-based line and
+// column numbers, and suggestions populated for a near-miss word.
 func TestScanLinesForTypos(t *testing.T) {
 	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
-	lines := []string{
-		"",
-		"hello world",
-		"helllo",
-		"",
-		"hello qwerx",
-	}
-	got, err := scanLinesForTypos(lines, dict)
+	input := "\nhello world\nhelllo\n\nhello qwerx\n"
+	got, err := scanForTypos(strings.NewReader(input), dict)
 	if err != nil {
-		t.Fatalf("scanLinesForTypos error: %v", err)
+		t.Fatalf("scanForTypos error: %v", err)
 	}
 	var gotHelllo, gotQwerx *MisspelledWord
 	for i := range got {
@@ -694,6 +685,6 @@ func TestScanLinesForTypos(t *testing.T) {
 		t.Errorf("qwerx at line/col %d/%d, want 5/7", gotQwerx.LineNumber, gotQwerx.Column)
 	}
 	if len(got) != 2 {
-		t.Errorf("scanLinesForTypos returned %d typos, want 2", len(got))
+		t.Errorf("scanForTypos returned %d typos, want 2", len(got))
 	}
 }

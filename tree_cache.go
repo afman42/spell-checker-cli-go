@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
@@ -62,25 +63,14 @@ func readBKTreeCacheAt(path string) (*BKTree, error) {
 }
 
 // writeBKTreeCacheAt encodes tree to path via a temp file + rename so a crash
-// never leaves a partial cache file.
+// never leaves a partial cache file. The cache is private to the user, so the
+// temp file's 0600 default needs no mode preservation.
 func writeBKTreeCacheAt(path string, tree *BKTree) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".bktree-*")
-	if err != nil {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(tree); err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if err := gob.NewEncoder(tmp).Encode(tree); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return writeFileAtomic(path, buf.String(), false)
 }
 
 // loadBKTreeCache returns the persisted tree for dict, or nil if none exists

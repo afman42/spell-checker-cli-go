@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,7 +49,7 @@ func runWatcher(rootPath string, dictionary map[string]struct{}, excludePatterns
 	fmt.Println("\nWatching for changes... (Ctrl+C to stop)")
 
 	eventCh := make(chan string, 100)
-	go debounceAndProcess(eventCh, concurrentDict)
+	go debounceAndProcess(eventCh, concurrentDict, os.Stdout)
 
 	// Main event loop
 	for {
@@ -117,22 +118,23 @@ func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh c
 		return
 	}
 
-	// Respect exclude patterns
-	excluded, err := shouldExclude(event.Name, patterns)
-	if err != nil || excluded {
+	if gate, _ := classifyFile(event.Name, patterns); gate != fileOK {
 		return
 	}
 
-	// Skip binary files
-	isBinary, err := isLikelyBinary(event.Name)
-	if err != nil || isBinary {
-		return
+	// Non-blocking: if the queue is full (the debounce loop is busy with a
+	// large batch), drop the event rather than stall the fsnotify loop — a
+	// blocked main loop can overflow fsnotify's internal buffer and lose the
+	// whole event stream. Editors emit multiple events per save, so the next
+	// one re-triggers the re-check.
+	select {
+	case eventCh <- event.Name:
+	default:
+		fmt.Fprintf(os.Stderr, "Watch: event queue full, dropping %s\n", event.Name)
 	}
-
-	eventCh <- event.Name
 }
 
-func debounceAndProcess(eventCh <-chan string, dict *ConcurrentDictionary) {
+func debounceAndProcess(eventCh <-chan string, dict *ConcurrentDictionary, out io.Writer) {
 	// Collect rapid events into a unique set, then process once the stream
 	// goes quiet for debouncePeriod.
 	pending := make(map[string]struct{})
@@ -157,14 +159,14 @@ func debounceAndProcess(eventCh <-chan string, dict *ConcurrentDictionary) {
 			}
 			timer = time.NewTimer(debouncePeriod)
 		case <-timer.C:
-			processBatch(pending, dict)
+			processBatch(pending, dict, out)
 			pending = make(map[string]struct{})
 			timer = nil
 		}
 	}
 }
 
-func processBatch(files map[string]struct{}, dict *ConcurrentDictionary) {
+func processBatch(files map[string]struct{}, dict *ConcurrentDictionary, out io.Writer) {
 	timestamp := time.Now().Format("15:04:05")
 	// Sort paths for deterministic batch output.
 	paths := make([]string, 0, len(files))
@@ -179,12 +181,12 @@ func processBatch(files map[string]struct{}, dict *ConcurrentDictionary) {
 			continue
 		}
 		if len(typos) == 0 {
-			fmt.Printf("[%s] %s - no typos\n", timestamp, path)
+			fmt.Fprintf(out, "[%s] %s - no typos\n", timestamp, path)
 			continue
 		}
-		fmt.Printf("[%s] %s\n", timestamp, path)
+		fmt.Fprintf(out, "[%s] %s\n", timestamp, path)
 		for _, m := range typos {
-			fmt.Printf("  - %s\n", formatTypoLine(m, m.Word, strings.Join(m.Suggestions, ", ")))
+			fmt.Fprintf(out, "  - %s\n", formatTypoLine(m, m.Word, strings.Join(m.Suggestions, ", ")))
 		}
 	}
 }

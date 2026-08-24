@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -29,29 +31,50 @@ func TestIsMarkdownExt(t *testing.T) {
 	}
 }
 
-// TestScanMarkdownLines verifies prose-only extraction: YAML frontmatter,
-// fenced code blocks, inline code spans, link destinations, and bare URLs are
-// stripped while real prose lines survive with their line positions.
+// TestScanMarkdownLines verifies prose-only extraction through checkFile on a
+// real temp .md file: YAML frontmatter, fenced code blocks, inline code
+// spans, link destinations, and bare URLs are stripped while real prose
+// survives with its line positions intact.
 func TestScanMarkdownLines(t *testing.T) {
-	input := []byte("---\ntitle: My Post\n---\n\nHello wrld here.\n\n```go\nfunc wrld() {}\n```\n\nInline `code wrld` and a link [text](http://example.com/api/v2/users).\n\nhttps://example.com/bare-url\n\nFinal line frm.\n")
-	got := scanMarkdownLines(input)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "post.md")
+	input := "---\ntitle: My Post\n---\n\nHello wrld here.\n\n```go\nfunc wrld() {}\n```\n\nInline `code wrld` and a link [text](http://example.com/api/v2/users).\n\nhttps://example.com/bare-url\n\nFinal line frm.\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := checkFile(path, NewConcurrentDictionary(map[string]struct{}{}))
+	if err != nil {
+		t.Fatalf("checkFile(%s) error: %v", path, err)
+	}
 
-	join := strings.Join(got, "\n")
-	// Prose survives.
-	if !strings.Contains(join, "Hello wrld here.") {
-		t.Errorf("prose line missing:\n%s", join)
-	}
-	if !strings.Contains(join, "Final line frm.") {
-		t.Errorf("last prose line missing:\n%s", join)
-	}
-	// Frontmatter, code fences, inline code, and URLs are stripped.
-	for _, banned := range []string{"title:", "func wrld", "code wrld", "http://example.com", "bare-url"} {
-		if strings.Contains(join, banned) {
-			t.Errorf("noise not stripped, contains %q:\n%s", banned, join)
+	words := make([]string, len(got))
+	var wrld *MisspelledWord
+	for i, m := range got {
+		words[i] = m.Word
+		if m.Word == "wrld" && wrld == nil {
+			wrld = &got[i]
 		}
 	}
-	// Link text survives, its destination is dropped.
-	if !strings.Contains(join, "link [text]") {
-		t.Errorf("link text should survive (dest stripped):\n%s", join)
+	join := strings.Join(words, "\n")
+
+	// Prose survives.
+	for _, want := range []string{"Hello", "here", "frm", "text"} {
+		if !strings.Contains(join, want) {
+			t.Errorf("prose word %q missing from result:\n%s", want, join)
+		}
+	}
+	// Frontmatter, code fences, inline code, and URLs are stripped.
+	for _, banned := range []string{"title", "My", "Post", "func", "code", "users", "https", "example", "bare-url"} {
+		if strings.Contains(join, banned) {
+			t.Errorf("noise not stripped, found %q:\n%s", banned, join)
+		}
+	}
+	// Line numbers stay accurate against the source file: wrld is on line 5,
+	// column 7 of the original input.
+	if wrld == nil {
+		t.Fatalf("expected misspelling %q, got:\n%s", "wrld", join)
+	}
+	if wrld.LineNumber != 5 || wrld.Column != 7 {
+		t.Errorf("wrld at line/col %d/%d, want 5/7", wrld.LineNumber, wrld.Column)
 	}
 }

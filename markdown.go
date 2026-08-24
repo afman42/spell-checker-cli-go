@@ -21,8 +21,8 @@ var markdownLinkDestRE = regexp.MustCompile(`\]\(([^)]*)\)`)
 var markdownURLRE = regexp.MustCompile(`\b(https?|ftp)://[^\s)]+`)
 
 // stripMarkdownNoise removes tokens from a markdown line that should not be
-// spell-checked: fenced code block delimiters (the whole block is skipped by
-// scanMarkdownLines), inline code spans, link destinations, and bare URLs.
+// spell-checked: inline code spans, link destinations, and bare URLs. Fence
+// delimiters are handled by scanMarkdownLine's state machine instead.
 // The replacement is a space so rune offsets in the original line are
 // preserved, keeping column numbers accurate.
 func stripMarkdownNoise(line string) string {
@@ -52,39 +52,34 @@ func spacesOfLen(s string) string {
 // start of a file.  The fence-strip logic handles the closing ---.
 var mdFrontmatterDelimRE = regexp.MustCompile(`^---\s*$`)
 
-// scanMarkdownLines filters a raw markdown file's content: it drops code
-// fence blocks and returns the remaining lines, preserving line numbers so
-// reported positions match the source.
-//
-// Implementation: iterate lines, track inCodeFence. When inside a fence,
-// skip the line (return "" so scanLinesForTypos sees nothing). YAML
-// frontmatter (opening --- at line 1) is also skipped until the closing ---.
-// The returned slice has empty strings for skipped lines to preserve count.
-func scanMarkdownLines(raw []byte) []string {
-	lines := strings.Split(string(raw), "\n")
-	out := make([]string, len(lines))
-	inCodeFence := false
-	inFrontmatter := false
-	for i, line := range lines {
-		trimmed := strings.TrimRight(line, "\r")
-		if i == 0 && mdFrontmatterDelimRE.MatchString(trimmed) {
-			inFrontmatter = true
-			continue
-		}
-		if inFrontmatter {
-			if mdFrontmatterDelimRE.MatchString(trimmed) {
-				inFrontmatter = false
-			}
-			continue
-		}
-		if markdownCodeFenceRE.MatchString(trimmed) {
-			inCodeFence = !inCodeFence
-			continue
-		}
-		if inCodeFence {
-			continue
-		}
-		out[i] = stripMarkdownNoise(trimmed)
+// mdState tracks code-fence and YAML-frontmatter state across the lines of a
+// markdown file.
+type mdState struct {
+	inCodeFence   bool
+	inFrontmatter bool
+}
+
+// scanMarkdownLine filters one physical line of a markdown file. It returns ""
+// for lines to skip (code-fence delimiters, code blocks, frontmatter) and the
+// prose with inline-code/URL noise stripped otherwise. lineNumber is 1-based
+// (frontmatter on line 1 only, per CommonMark).
+func scanMarkdownLine(trimmed string, lineNumber int, st *mdState) string {
+	if lineNumber == 1 && mdFrontmatterDelimRE.MatchString(trimmed) {
+		st.inFrontmatter = true
+		return ""
 	}
-	return out
+	if st.inFrontmatter {
+		if mdFrontmatterDelimRE.MatchString(trimmed) {
+			st.inFrontmatter = false
+		}
+		return ""
+	}
+	if markdownCodeFenceRE.MatchString(trimmed) {
+		st.inCodeFence = !st.inCodeFence
+		return ""
+	}
+	if st.inCodeFence {
+		return ""
+	}
+	return stripMarkdownNoise(trimmed)
 }

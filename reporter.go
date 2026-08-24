@@ -45,7 +45,7 @@ var htmlDocType = `<!DOCTYPE html>
 const htmlFooter = "\n</div>\n</body>\n</html>"
 
 // summarizeStats computes total counts from all results.
-func summarizeStats(results map[string][]MisspelledWord) (totalFiles, totalTypos, totalSuggestions int) {
+func summarizeStats(results CheckResults) (totalFiles, totalTypos, totalSuggestions int) {
 	totalFiles = len(results)
 	for _, words := range results {
 		totalTypos += len(words)
@@ -66,7 +66,7 @@ type fileEntry struct {
 // --- Multi-file HTML report generator ---
 
 // generateMultiFileHTMLReport creates a directory with an index.html and separate reports.
-func generateMultiFileHTMLReport(outputDir string, results map[string][]MisspelledWord) error {
+func generateMultiFileHTMLReport(outputDir string, results CheckResults) error {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("could not create output directory %s: %w", outputDir, err)
 	}
@@ -149,7 +149,7 @@ func safeReportPath(path string) (string, error) {
 }
 
 // generateIndexFile creates the main summary/index page with links.
-func generateIndexFile(outputDir string, entries []fileEntry, results map[string][]MisspelledWord) error {
+func generateIndexFile(outputDir string, entries []fileEntry, results CheckResults) error {
 	indexPath := filepath.Join(outputDir, "index.html")
 	file, err := os.Create(indexPath)
 	if err != nil {
@@ -239,9 +239,7 @@ func generateSingleReportFile(outputDir, filename, filePath string, words []Miss
 	if len(words) > 0 {
 		fmt.Fprint(w, `<table><tr><th>Line</th><th>Col</th><th>Word</th><th>Suggestions</th></tr>`)
 		for _, m := range words {
-			suggestionsStr := strings.Join(m.Suggestions, ", ")
-			fmt.Fprintf(w, `<tr><td class="line">%d</td><td class="col">%d</td><td class="word">%s</td><td class="suggestions">%s</td></tr>`,
-				m.LineNumber, m.Column, html.EscapeString(m.Word), html.EscapeString(suggestionsStr))
+			writeTypoRow(w, m)
 		}
 		fmt.Fprint(w, `</table>`)
 	} else {
@@ -267,7 +265,7 @@ func relLink(current, target string) string {
 
 // --- Single-file HTML report ---
 
-func generateHTMLReport(writer io.Writer, results map[string][]MisspelledWord) error {
+func generateHTMLReport(writer io.Writer, results CheckResults) error {
 	w := &errWriter{w: writer}
 	totalFiles, totalTypos, totalSuggestions := summarizeStats(results)
 
@@ -285,9 +283,7 @@ func generateHTMLReport(writer io.Writer, results map[string][]MisspelledWord) e
 			if len(words) > 0 {
 				fmt.Fprint(w, `<table><tr><th>Line</th><th>Col</th><th>Word</th><th>Suggestions</th></tr>`)
 				for _, m := range words {
-					suggestionsStr := strings.Join(m.Suggestions, ", ")
-					fmt.Fprintf(w, `<tr><td class="line">%d</td><td class="col">%d</td><td class="word">%s</td><td class="suggestions">%s</td></tr>`,
-						m.LineNumber, m.Column, html.EscapeString(m.Word), html.EscapeString(suggestionsStr))
+					writeTypoRow(w, m)
 				}
 				fmt.Fprint(w, `</table>`)
 			} else {
@@ -337,6 +333,13 @@ func writeStatsBar(w io.Writer, totalFiles, totalTypos, totalSuggestions int) {
 </div>`, totalFiles, cls, totalTypos, totalSuggestions)
 }
 
+// writeTypoRow emits one typo table row, shared by the single-file and
+// multi-file HTML reports so the markup cannot drift between them.
+func writeTypoRow(w io.Writer, m MisspelledWord) {
+	fmt.Fprintf(w, `<tr><td class="line">%d</td><td class="col">%d</td><td class="word">%s</td><td class="suggestions">%s</td></tr>`,
+		m.LineNumber, m.Column, html.EscapeString(m.Word), html.EscapeString(strings.Join(m.Suggestions, ", ")))
+}
+
 // --- Text report with optional terminal colors ---
 
 // typoMessage renders the shared "X appears to be a typo" phrase with an
@@ -353,7 +356,7 @@ func typoMessage(word, suggestions string) string {
 
 // sortedResultPaths returns the result map's keys sorted, so every report
 // format writes deterministic output.
-func sortedResultPaths(results map[string][]MisspelledWord) []string {
+func sortedResultPaths(results CheckResults) []string {
 	paths := make([]string, 0, len(results))
 	for p := range results {
 		paths = append(paths, p)
@@ -377,7 +380,7 @@ func formatTypoLine(m MisspelledWord, word, suggestions string) string {
 	return fmt.Sprintf("Line %d, Col %d: %s", m.LineNumber, m.Column, typoMessage(word, suggestions))
 }
 
-func generateTextReport(writer io.Writer, results map[string][]MisspelledWord) error {
+func generateTextReport(writer io.Writer, results CheckResults) error {
 	w := &errWriter{w: writer}
 	useColors := false
 	if f, ok := writer.(*os.File); ok {
@@ -443,7 +446,7 @@ type jsonReport struct {
 
 // generateJSONReport writes a machine-readable report. Files are sorted by path
 // for deterministic output, and empty suggestion lists serialize as [] (not null).
-func generateJSONReport(writer io.Writer, results map[string][]MisspelledWord) error {
+func generateJSONReport(writer io.Writer, results CheckResults) error {
 	var report jsonReport
 	totalFiles, totalTypos, totalSuggestions := summarizeStats(results)
 	report.Summary.Files = totalFiles
