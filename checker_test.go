@@ -375,7 +375,7 @@ func TestShouldExcludeInvalidPattern(t *testing.T) {
 // TestScanForTyposCRLF ensures carriage returns don't corrupt tokenizing.
 func TestScanForTyposCRLF(t *testing.T) {
 	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
-	typos, err := scanForTypos(strings.NewReader("hello world\r\nhello world\r\n"), dict)
+	typos, err := scanForTypos(strings.NewReader("hello world\r\nhello world\r\n"), dict, scanOptions{})
 	if err != nil {
 		t.Fatalf("scanForTypos error: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestScanForTyposLongLine(t *testing.T) {
 	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
 	// A line just over the default token limit — previously failed.
 	long := strings.Repeat("a", bufio.MaxScanTokenSize+10)
-	typos, err := scanForTypos(strings.NewReader(long), dict)
+	typos, err := scanForTypos(strings.NewReader(long), dict, scanOptions{})
 	if err != nil {
 		t.Fatalf("scanForTypos failed on a long line: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestScanForTyposLongLine(t *testing.T) {
 func TestScanForTyposHugeLineSkipped(t *testing.T) {
 	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}})
 	huge := strings.Repeat("a", maxLineLen+10) + "\nwrold\nother\n"
-	typos, err := scanForTypos(strings.NewReader(huge), dict)
+	typos, err := scanForTypos(strings.NewReader(huge), dict, scanOptions{})
 	if err != nil {
 		t.Fatalf("scanForTypos: unexpected error, got %v", err)
 	}
@@ -583,7 +583,7 @@ func TestScanForTyposSkipsIdentifierFragments(t *testing.T) {
 	dict := NewConcurrentDictionary(map[string]struct{}{})
 	// Mi03x_er -> Mi/x/er, 10px -> px, 3D -> D are identifiers/units; the two
 	// spaced words are real prose (and misspelled relative to the empty dict).
-	typos, err := scanForTypos(strings.NewReader("Mi03x_er 10px 3D hello wolrd\n"), dict)
+	typos, err := scanForTypos(strings.NewReader("Mi03x_er 10px 3D hello wolrd\n"), dict, scanOptions{})
 	if err != nil {
 		t.Fatalf("scanForTypos: %v", err)
 	}
@@ -650,7 +650,7 @@ func TestCollectFilesDefaultExcludes(t *testing.T) {
 func TestScanLinesForTypos(t *testing.T) {
 	dict := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
 	input := "\nhello world\nhelllo\n\nhello qwerx\n"
-	got, err := scanForTypos(strings.NewReader(input), dict)
+	got, err := scanForTypos(strings.NewReader(input), dict, scanOptions{})
 	if err != nil {
 		t.Fatalf("scanForTypos error: %v", err)
 	}

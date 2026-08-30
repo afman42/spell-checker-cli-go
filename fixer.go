@@ -122,7 +122,7 @@ func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error
 	if dryRun || res.Fixes == 0 {
 		return res, nil
 	}
-	return res, writeAtomic(path, out.String())
+	return res, writeFileAtomic(path, out.String(), true)
 }
 
 // fixStdin applies the top suggestion for each typo in piped stdin and writes
@@ -261,12 +261,4 @@ func writeFileAtomic(path, content string, preserveMode bool) error {
 		dirFile.Close()
 	}
 	return nil
-}
-
-// writeAtomic writes content to a temp file in the same directory, then renames
-// it over the target so readers never see a partial write. The temp file is
-// fsynced before the rename so a crash doesn't leave a renamed-but-empty file,
-// and the original file's permissions are preserved.
-func writeAtomic(path, content string) error {
-	return writeFileAtomic(path, content, true)
 }

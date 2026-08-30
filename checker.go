@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -56,17 +57,39 @@ func NewConcurrentDictionary(dict map[string]struct{}) *ConcurrentDictionary {
 }
 
 // treeLocked returns the cached BK-tree, building it once on first access and
-// reusing one persisted on disk for identical dictionaries. Caller must hold
-// cd.mu.
+// reusing one persisted on disk for identical dictionaries. Caller must NOT
+// hold cd.mu; the method handles locking internally and never holds the mutex
+// during disk IO or tree construction.
 func (cd *ConcurrentDictionary) treeLocked() *BKTree {
-	if cd.bkTree == nil && len(cd.dict) >= bkTreeMinDictSize {
-		cd.bkTree = loadBKTreeCache(cd.dict)
-		if cd.bkTree == nil {
-			cd.bkTree = NewBKTree(cd.dict)
-			storeBKTreeCache(cd.dict, cd.bkTree)
-		}
+	cd.mu.Lock()
+	if cd.bkTree != nil {
+		t := cd.bkTree
+		cd.mu.Unlock()
+		return t
 	}
-	return cd.bkTree
+	if len(cd.dict) < bkTreeMinDictSize {
+		cd.mu.Unlock()
+		return nil
+	}
+	cd.mu.Unlock()
+	if cached := loadBKTreeCache(cd.dict); cached != nil {
+		cd.mu.Lock()
+		if cd.bkTree == nil {
+			cd.bkTree = cached
+		}
+		t := cd.bkTree
+		cd.mu.Unlock()
+		return t
+	}
+	built := NewBKTree(cd.dict)
+	storeBKTreeCache(cd.dict, built)
+	cd.mu.Lock()
+	if cd.bkTree == nil {
+		cd.bkTree = built
+	}
+	t := cd.bkTree
+	cd.mu.Unlock()
+	return t
 }
 
 // Contains checks if a word exists in the dictionary
@@ -92,10 +115,8 @@ func (cd *ConcurrentDictionary) Suggest(word string) []string {
 		cd.mu.Unlock()
 		return append([]string{}, cached...)
 	}
-	// Build the tree under the lock (build is serialized); it is immutable
-	// after construction, so the search below runs lock-free across workers.
-	tree := cd.treeLocked()
 	cd.mu.Unlock()
+	tree := cd.treeLocked()
 
 	var sug []string
 	if tree != nil {
@@ -129,18 +150,25 @@ type CheckResult struct {
 // runConcurrentCheckerWithDict is the core scanner using an already-built
 // ConcurrentDictionary, so the BK-tree is constructed only once per run.
 func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (CheckResults, error) {
-	// Phase 1: Collect all file paths (filters applied)
-	allFiles, err := collectFiles(rootPath, excludePatterns, verbose)
+	return runConcurrentCheckerWithDictAndContext(context.Background(), rootPath, concurrentDict, excludePatterns, verbose, scanOptions{})
+}
+
+func runConcurrentCheckerWithDictAndContext(ctx context.Context, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool, opts scanOptions) (CheckResults, error) {
+	allFiles, err := collectFilesWithContext(ctx, rootPath, excludePatterns, verbose)
 	if err != nil {
 		return nil, err
 	}
-	return runCheckerOnFiles(allFiles, concurrentDict, verbose)
+	return runCheckerOnFilesWithContext(ctx, allFiles, concurrentDict, verbose, opts)
 }
 
 // runCheckerOnFiles runs the worker pool over an already-collected list of
 // files. Shared by the directory walk (runConcurrentCheckerWithDict) and the
 // --git-diff path (runGitDiffChecker), which supplies its own file list.
 func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, verbose bool) (CheckResults, error) {
+	return runCheckerOnFilesWithContext(context.Background(), files, concurrentDict, verbose, scanOptions{})
+}
+
+func runCheckerOnFilesWithContext(ctx context.Context, files []string, concurrentDict *ConcurrentDictionary, verbose bool, opts scanOptions) (CheckResults, error) {
 	if len(files) == 0 {
 		return make(CheckResults), nil
 	}
@@ -157,15 +185,18 @@ func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, ver
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
-		go worker(&wg, jobs, results, concurrentDict)
+		go workerWithContext(ctx, &wg, jobs, results, concurrentDict, opts, nil)
 	}
 
-	// Sender goroutine: pushes collected file paths to workers
 	go func() {
+		defer close(jobs)
 		for _, path := range files {
-			jobs <- path
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- path:
+			}
 		}
-		close(jobs)
 	}()
 
 	// Sink goroutine: closes results when all workers are done
@@ -215,13 +246,14 @@ func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, ver
 // filtered by the same exclude + binary rules as a directory walk so ignored
 // or binary files are still skipped. Runs the same worker pool as the walk.
 func runGitDiffChecker(ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool) (CheckResults, error) {
-	raw, err := gitDiffFiles(ref)
+	return runGitDiffCheckerWithContext(context.Background(), ref, rootPath, concurrentDict, excludePatterns, verbose, scanOptions{})
+}
+
+func runGitDiffCheckerWithContext(ctx context.Context, ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool, opts scanOptions) (CheckResults, error) {
+	raw, err := gitDiffFilesWithContext(ctx, ref)
 	if err != nil {
 		return nil, fmt.Errorf("git-diff: %w", err)
 	}
-	// Restrict git-diff results to rootPath: normalize both sides to
-	// forward slashes and clean them (dropping any trailing slash) for a
-	// clean exact-or-prefix match.
 	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
 	if rootPath != "." {
 		filtered := raw[:0]
@@ -236,6 +268,11 @@ func runGitDiffChecker(ref string, rootPath string, concurrentDict *ConcurrentDi
 	patterns := mergeDefaultExcludes(excludePatterns)
 	var files []string
 	for _, p := range raw {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		gate, err := classifyFile(p, patterns)
 		switch gate {
 		case fileExcludeErr:
@@ -261,7 +298,134 @@ func runGitDiffChecker(ref string, rootPath string, concurrentDict *ConcurrentDi
 	if verbose {
 		fmt.Fprintf(os.Stderr, "git-diff: %d file(s) to check\n", len(files))
 	}
-	return runCheckerOnFiles(files, concurrentDict, verbose)
+	return runCheckerOnFilesWithContext(ctx, files, concurrentDict, verbose, opts)
+}
+
+func runGitDiffCheckerWithHunks(ctx context.Context, ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool, changedLines ChangedLines, opts scanOptions) (CheckResults, error) {
+	raw, err := gitDiffFilesWithContext(ctx, ref)
+	if err != nil {
+		return nil, fmt.Errorf("git-diff: %w", err)
+	}
+	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
+	if rootPath != "." {
+		filtered := raw[:0]
+		for _, p := range raw {
+			pNorm := filepath.ToSlash(filepath.Clean(p))
+			if pNorm == rootPath || strings.HasPrefix(pNorm, rootPath+"/") {
+				filtered = append(filtered, p)
+			}
+		}
+		raw = filtered
+	}
+	patterns := mergeDefaultExcludes(excludePatterns)
+	var files []string
+	for _, p := range raw {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		gate, err := classifyFile(p, patterns)
+		switch gate {
+		case fileExcludeErr:
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", p, err)
+			}
+		case fileExcluded:
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Skipping excluded file: %s\n", p)
+			}
+		case fileBinaryErr:
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", p, err)
+			}
+		case fileBinary:
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", p)
+			}
+		default:
+			files = append(files, p)
+		}
+	}
+	if verbose {
+		fmt.Fprintf(os.Stderr, "git-diff: %d file(s) to check\n", len(files))
+	}
+	return runCheckerOnFilesWithHunks(ctx, files, concurrentDict, verbose, changedLines, opts)
+}
+
+func runCheckerOnFilesWithHunks(ctx context.Context, files []string, concurrentDict *ConcurrentDictionary, verbose bool, changedLines ChangedLines, opts scanOptions) (CheckResults, error) {
+	if len(files) == 0 {
+		return make(CheckResults), nil
+	}
+	if changedLines != nil {
+		filtered := files[:0]
+		for _, f := range files {
+			if _, ok := changedLines[f]; ok {
+				filtered = append(filtered, f)
+			} else if verbose {
+				fmt.Fprintf(os.Stderr, "Skipping file with no changed lines: %s\n", f)
+			}
+		}
+		files = filtered
+		if len(files) == 0 {
+			return make(CheckResults), nil
+		}
+	}
+	totalFiles := len(files)
+	numWorkers := runtime.NumCPU()
+	jobBuf := numWorkers * 10
+	if jobBuf < 100 {
+		jobBuf = 100
+	}
+	jobs := make(chan string, jobBuf)
+	results := make(chan CheckResult, jobBuf)
+	var wg sync.WaitGroup
+	for range numWorkers {
+		wg.Add(1)
+		go workerWithHunks(ctx, &wg, jobs, results, concurrentDict, changedLines, opts)
+	}
+	go func() {
+		defer close(jobs)
+		for _, path := range files {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- path:
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	showProgress := totalFiles > 1 && isStderrTerminal()
+	var processed atomic.Int64
+	var errored atomic.Int64
+	progressDone := make(chan struct{})
+	if showProgress {
+		go renderProgressBar(totalFiles, &processed, &errored, progressDone)
+	}
+	allTypos := make(CheckResults)
+	var errs []error
+	for result := range results {
+		processed.Add(1)
+		if result.Err != nil {
+			errored.Add(1)
+			errs = append(errs, result.Err)
+			continue
+		}
+		if len(result.Typos) > 0 {
+			allTypos[result.FilePath] = result.Typos
+		}
+	}
+	close(progressDone)
+	if showProgress {
+		fmt.Fprint(os.Stderr, "\r"+strings.Repeat(" ", 80)+"\r")
+	}
+	if len(errs) > 0 {
+		return allTypos, errors.Join(errs...)
+	}
+	return allTypos, nil
 }
 
 // defaultExcludes are directories and files skipped even when no --exclude is
@@ -291,9 +455,18 @@ func mergeDefaultExcludes(patterns []string) []string {
 // collectFiles walks rootPath and returns a list of file paths that should be
 // checked (excludes, binary files, and directories are filtered out).
 func collectFiles(rootPath string, excludePatterns []string, verbose bool) ([]string, error) {
+	return collectFilesWithContext(context.Background(), rootPath, excludePatterns, verbose)
+}
+
+func collectFilesWithContext(ctx context.Context, rootPath string, excludePatterns []string, verbose bool) ([]string, error) {
 	var files []string
 	patterns := mergeDefaultExcludes(excludePatterns)
 	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err != nil {
 			// A failed root means nothing can be scanned: report it. A failed
 			// subdirectory is just one inaccessible subtree — skip it and
@@ -393,24 +566,54 @@ func isStderrTerminal() bool {
 var checkFileFunc = checkFile
 
 func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary) {
+	workerWithContext(context.Background(), wg, jobs, results, dictionary, scanOptions{}, nil)
+}
+
+func workerWithContext(ctx context.Context, wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary, opts scanOptions, changedLines ChangedLines) {
 	defer wg.Done()
 	for path := range jobs {
-		typos, err := checkFileFunc(path, dictionary)
-		results <- CheckResult{FilePath: path, Typos: typos, Err: err}
+		fileOpts := opts
+		if changedLines != nil {
+			if set, ok := changedLines[path]; ok {
+				fileOpts.ChangedLines = set
+			} else {
+				select {
+				case <-ctx.Done():
+					return
+				case results <- CheckResult{FilePath: path, Typos: nil, Err: nil}:
+				}
+				continue
+			}
+		}
+		var typos []MisspelledWord
+		var err error
+		if changedLines == nil && fileOpts.ChangedLines == nil && opts.MinWordLength == 0 && !opts.Verbose {
+			typos, err = checkFileFunc(path, dictionary)
+		} else {
+			typos, err = checkFileWithOptions(path, dictionary, fileOpts)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case results <- CheckResult{FilePath: path, Typos: typos, Err: err}:
+		}
 	}
 }
 
+func workerWithHunks(ctx context.Context, wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary, changedLines ChangedLines, opts scanOptions) {
+	workerWithContext(ctx, wg, jobs, results, dictionary, opts, changedLines)
+}
+
 func checkFile(filePath string, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
+	return checkFileWithOptions(filePath, dictionary, scanOptions{})
+}
+
+func checkFileWithOptions(filePath string, dictionary *ConcurrentDictionary, opts scanOptions) ([]MisspelledWord, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("could not open %s: %w", filePath, err)
 	}
 	defer file.Close()
-
-	// Markdown-aware scanning: strip fenced code, inline code, link URLs and
-	// YAML frontmatter before tokenizing so prose is checked, code isn't.
-	// Streamed through the same bounded lineReader as plain text (1 MiB line
-	// cap), so a huge .md file cannot OOM the process.
 	if isMarkdownExt(filePath) {
 		lr := newLineReader(file, maxLineLen)
 		var st mdState
@@ -424,13 +627,12 @@ func checkFile(filePath string, dictionary *ConcurrentDictionary) ([]MisspelledW
 				return nil, fmt.Errorf("failed scanning %s: %w", filePath, err)
 			}
 			if l := scanMarkdownLine(strings.TrimRight(line, "\r\n"), lineNumber, &st); l != "" {
-				misspelled = scanLineForTypos(l, lineNumber, dictionary, misspelled)
+				misspelled = scanLineForTypos(l, lineNumber, dictionary, opts, misspelled)
 			}
 		}
 		return misspelled, nil
 	}
-
-	misspelledWords, err := scanForTypos(file, dictionary)
+	misspelledWords, err := scanForTypos(file, dictionary, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed scanning %s: %w", filePath, err)
 	}
@@ -446,15 +648,13 @@ func isMarkdownExt(filePath string) bool {
 	return false
 }
 
-// scanOptions controls per-scan filters applied inside scanForTypos. Set once
-// per run from main; avoids threading extra params through every call site.
+// scanOptions controls per-scan filters applied inside scanForTypos.
 type scanOptions struct {
 	// MinWordLength skips tokens shorter than this. 0 = check all.
 	MinWordLength int
+	Verbose       bool
+	ChangedLines  map[int]struct{}
 }
-
-// scanOpts is the active scan configuration, set by run() before scanning.
-var scanOpts = scanOptions{}
 
 // scanForTypos reads a stream line by line and returns misspelled words with
 // 1-based line and (rune) column positions.
@@ -561,7 +761,12 @@ nextLine:
 // misspelled and returns the extended slice. Its sole consumer is the
 // streaming scanner scanForTypos, so the tokenize/filter/report loop exists
 // in exactly one place.
-func scanLineForTypos(line string, lineNumber int, dictionary *ConcurrentDictionary, misspelled []MisspelledWord) []MisspelledWord {
+func scanLineForTypos(line string, lineNumber int, dictionary *ConcurrentDictionary, opts scanOptions, misspelled []MisspelledWord) []MisspelledWord {
+	if opts.ChangedLines != nil {
+		if _, ok := opts.ChangedLines[lineNumber]; !ok {
+			return misspelled
+		}
+	}
 	for _, indices := range wordRegex.FindAllStringIndex(line, -1) {
 		word := line[indices[0]:indices[1]]
 		// Skip tokens that are fragments of identifiers (adjacent to a digit
@@ -570,7 +775,7 @@ func scanLineForTypos(line string, lineNumber int, dictionary *ConcurrentDiction
 		if isIdentifierFragment(line, indices[0], indices[1]) {
 			continue
 		}
-		if scanOpts.MinWordLength > 0 && utf8.RuneCountInString(word) < scanOpts.MinWordLength {
+		if opts.MinWordLength > 0 && utf8.RuneCountInString(word) < opts.MinWordLength {
 			continue
 		}
 		if !dictionary.Contains(word) {
@@ -585,7 +790,7 @@ func scanLineForTypos(line string, lineNumber int, dictionary *ConcurrentDiction
 	return misspelled
 }
 
-func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
+func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary, opts scanOptions) ([]MisspelledWord, error) {
 	var misspelledWords []MisspelledWord
 	lr := newLineReader(r, maxLineLen)
 	for {
@@ -596,7 +801,7 @@ func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWo
 		if err != nil {
 			return nil, err
 		}
-		misspelledWords = scanLineForTypos(line, lineNumber, dictionary, misspelledWords)
+		misspelledWords = scanLineForTypos(line, lineNumber, dictionary, opts, misspelledWords)
 	}
 	return misspelledWords, nil
 }
@@ -767,8 +972,8 @@ func classifyFile(path string, patterns []string) (fileGate, error) {
 	return fileOK, nil
 }
 
-func checkStdin(r io.Reader, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
-	misspelledWords, err := scanForTypos(r, dictionary)
+func checkStdin(r io.Reader, dictionary *ConcurrentDictionary, opts scanOptions) ([]MisspelledWord, error) {
+	misspelledWords, err := scanForTypos(r, dictionary, opts)
 	if err != nil {
 		return nil, fmt.Errorf("error reading stdin: %w", err)
 	}

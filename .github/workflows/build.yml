@@ -202,6 +202,53 @@ jobs:
             exit 1
           fi
 
+      - name: Test CLI - --only-changed-lines requires --git-diff
+        run: |
+          set +e
+          ./bin/linux_amd64/spellchecker --only-changed-lines ./test/ 2> ./tmp/only-changed-lines-validation.txt
+          code=$?
+          set -e
+          if [ "$code" -ne 2 ]; then
+            echo "Expected exit 2 for --only-changed-lines without --git-diff, got $code"
+            cat ./tmp/only-changed-lines-validation.txt
+            exit 1
+          fi
+          if ! grep -q "only-changed-lines requires --git-diff" ./tmp/only-changed-lines-validation.txt; then
+            echo "Expected validation message not found"
+            cat ./tmp/only-changed-lines-validation.txt
+            exit 1
+          fi
+
+      - name: Test CLI - --only-changed-lines hunk filter
+        run: |
+          tmp=$(mktemp -d)
+          cp ./bin/linux_amd64/spellchecker "$tmp/spellchecker"
+          cd "$tmp"
+          git init -q
+          git config user.email "ci@test.com"
+          git config user.name "ci"
+          printf "teh world\nhello world\n" > a.txt
+          git add a.txt
+          git commit -qm "init"
+          printf "teh world\nteh quick\n" > a.txt
+          set +e
+          ./spellchecker --git-diff HEAD --verbose . > /tmp/hunk-all-out.txt 2>&1
+          ./spellchecker --git-diff HEAD --only-changed-lines --verbose . > /tmp/hunk-filtered-out.txt 2>&1
+          set -e
+          filtered_count=$(grep -c "appears to be a typo" /tmp/hunk-filtered-out.txt || true)
+          all_count=$(grep -c "appears to be a typo" /tmp/hunk-all-out.txt || true)
+          echo "filtered=$filtered_count all=$all_count"
+          if [ "$filtered_count" -ne 1 ]; then
+            echo "Expected 1 typo with --only-changed-lines, got $filtered_count"
+            cat /tmp/hunk-filtered-out.txt
+            exit 1
+          fi
+          if [ "$all_count" -ne 2 ]; then
+            echo "Expected 2 typos without filter, got $all_count"
+            cat /tmp/hunk-all-out.txt
+            exit 1
+          fi
+
       - name: Upload integration test results
         uses: actions/upload-artifact@v4
         with:

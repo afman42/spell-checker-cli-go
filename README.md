@@ -22,9 +22,10 @@ typos with ranked "did you mean?" suggestions.
   files (`.md`, `.markdown`) are scanned prose-only: fenced code blocks, inline
   code, link URLs, and YAML frontmatter are stripped before tokenizing.
 - **Scopeable** — restrict a scan to your changed files with `--git-diff` (against
-  a ref or `staged`), keep project words valid with `--ignore-word`, and filter
-  short tokens with `--min-word-length`. A `.spellignore` file glob-excludes like
-  `.gitignore`.
+  a ref or `staged`), or to *only the added lines* with `--only-changed-lines`
+  (hunk-scoped, parsed from `git diff --unified=0`). Keep project words valid
+  with `--ignore-word`, and filter short tokens with `--min-word-length`.
+  A `.spellignore` file glob-excludes like `.gitignore`.
 - **CI-friendly** — deterministic output, machine-readable JSON, and distinct
   exit codes: `1` when typos are found or remain unfixed, `2` when the tool
   cannot run.
@@ -82,6 +83,7 @@ go build -o spellchecker .
 | `--ignore-word` | Word(s) to treat as valid (repeatable or comma-separated) | `--ignore-word teh,aux` |
 | `--min-word-length` | Skip tokens shorter than N characters (default 0 = check all) | `--min-word-length 3` |
 | `--git-diff` | Scan only files changed vs a git ref (`staged` for the index) | `--git-diff main` |
+| `--only-changed-lines` | With `--git-diff`: only report typos on added lines (hunk-scoped) | `--git-diff main --only-changed-lines` |
 | `--config` | Explicit path to a config file (overrides the auto search) | `--config ./ci.yaml` |
 
 Settings precedence: **flags > config file > defaults**. A flag only overrides
@@ -160,6 +162,9 @@ file is scanned normally. A single pathological line never fails the file.
 # Scan only staged files in a pre-commit hook
 ./spellchecker --git-diff staged .
 
+# Scan only the lines you added (not the whole changed file)
+./spellchecker --git-diff main --only-changed-lines .
+
 # Treat project jargon as valid for one run
 ./spellchecker --ignore-word aux,k8s ./src/
 
@@ -183,6 +188,7 @@ exclude:
 personal-dictionary: ".project-words.txt"
 format: "html"
 output: "./reports/"
+only-changed-lines: false
 ```
 
 The cwd config wins over the home-directory config. Any flag you pass on the
@@ -220,6 +226,20 @@ files are still skipped:
 ```
 
 Outside a git repo, or with an unknown ref, the tool exits `2` with a git error.
+
+#### `--only-changed-lines`
+
+Add `--only-changed-lines` to restrict `--git-diff` to typos on *added lines only*.
+The tool runs `git diff --unified=0 <ref>` and parses hunk headers (`@@ -old +new @@`)
+to build the set of added line numbers per file. Typos on unchanged lines are
+suppressed, so a large file with one new typo reports one finding, not the
+whole file. Requires `--git-diff`; without it the flag is a validation error
+(exit `2`).
+
+```bash
+./spellchecker --git-diff main --only-changed-lines .   # only added lines
+./spellchecker --git-diff staged --only-changed-lines . # only staged hunks
+```
 
 #### Markdown-aware scanning
 
@@ -461,6 +481,8 @@ git commit --no-verify
 | **Default excludes** | `.git`, `node_modules`, `vendor`, venvs, and tool caches are always skipped; `--exclude` patterns merge on top |
 | **Watch mode** | `fsnotify` watches directories, debounces rapid save events (200 ms) |
 | **Atomic writes** | `--fix` writes a temp file, `fsync`s it, renames over the target, then syncs the directory — crash-safe and permission-preserving |
+| **Hunk filter** | `--only-changed-lines` parses `git diff --unified=0` hunks and reports only added-line typos |
+| **Graceful shutdown** | `signal.NotifyContext` cancels the scan on `SIGINT`/`SIGTERM`; partial results are still reported, git uses `exec.CommandContext` |
 
 ---
 

@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
@@ -58,7 +62,8 @@ type Config struct {
 	// GitDiff restricts the scan to files changed relative to a git ref.
 	// "staged" means the staged/changes; any other value is treated as a ref
 	// (e.g. "main") diffed against the working tree.
-	GitDiff string `yaml:"git-diff"`
+	GitDiff          string `yaml:"git-diff"`
+	OnlyChangedLines bool   `yaml:"only-changed-lines"`
 }
 
 // Validate ensures the configuration is valid
@@ -73,6 +78,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MinWordLength < 0 {
 		return fmt.Errorf("min-word-length must be >= 0, got %d", c.MinWordLength)
+	}
+	if c.OnlyChangedLines && c.GitDiff == "" {
+		return fmt.Errorf("--only-changed-lines requires --git-diff")
 	}
 	return nil
 }
@@ -148,22 +156,21 @@ func loadConfig(args []string) (*Config, []string, error) {
 	ignoreWordFlag := fs.StringSlice("ignore-word", nil, "Optional: word(s) to treat as valid (repeatable, or comma-separated).")
 	minWordLengthFlag := fs.Int("min-word-length", 0, "Optional: minimum token length to check; shorter tokens are skipped (default 0 = check all).")
 	gitDiffFlag := fs.String("git-diff", "", "Optional: scan only files changed relative to a git ref (e.g. 'main'). Use 'staged' for staged changes.")
+	onlyChangedLinesFlag := fs.Bool("only-changed-lines", false, "With --git-diff: only report typos on added lines (parsed from git diff hunks).")
 	if err := fs.Parse(args); err != nil {
 		return nil, nil, err
 	}
 
-	// --- Load Config File (YAML) ---
+	// --- Load Config File (YAML) — single load, explicit --config wins ---
 	cfg := &Config{}
-	if path := findConfigFile(configSearchDirs()); path != "" {
-		loaded, err := loadYAMLConfig(path)
+	if fs.Lookup("config").Changed && *configFlag != "" {
+		loaded, err := loadYAMLConfig(*configFlag)
 		if err != nil {
 			return nil, nil, err
 		}
 		cfg = loaded
-	}
-	// --- Apply explicit --config override (replaces auto-discovered cfg) ---
-	if fs.Lookup("config").Changed && *configFlag != "" {
-		loaded, err := loadYAMLConfig(*configFlag)
+	} else if path := findConfigFile(configSearchDirs()); path != "" {
+		loaded, err := loadYAMLConfig(path)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -213,6 +220,9 @@ func loadConfig(args []string) (*Config, []string, error) {
 	if fs.Lookup("git-diff").Changed {
 		cfg.GitDiff = *gitDiffFlag
 	}
+	if fs.Lookup("only-changed-lines").Changed {
+		cfg.OnlyChangedLines = *onlyChangedLinesFlag
+	}
 
 	// Validate the configuration
 	if err := cfg.Validate(); err != nil {
@@ -227,7 +237,9 @@ func loadConfig(args []string) (*Config, []string, error) {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	os.Exit(runWithContext(ctx, os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // writeReport renders results in the given format to w. HTML is only selected
@@ -255,51 +267,48 @@ func writeReport(w io.Writer, results CheckResults, format OutputFormat) error {
 }
 
 // run executes the CLI with the given arguments and returns the exit code.
+// Kept for backward compat with tests that call run(args) directly.
 func run(args []string) int {
+	return runWithContext(context.Background(), args, os.Stdout, os.Stderr)
+}
+
+func runWithContext(ctx context.Context, args []string, outW, errW io.Writer) int {
 	// --- Load Configuration ---
 	cfg, positionals, err := loadConfig(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Fatal error loading configuration: %v\n", err)
+		fmt.Fprintln(errW, fmt.Sprintf("Fatal error loading configuration: %v", err))
 		return exitError
 	}
 
 	// Early exit: --version after config load, before heavy dictionary build.
 	if cfg.Version {
-		fmt.Println(versionString)
+		fmt.Fprintln(outW, versionString)
 		return exitOK
 	}
-	// --quiet: suppress all stdout/stderr output so only the exit code is
-	// meaningful (CI, scripts). Restore originals on return so concurrent
-	origOut, origErr := os.Stdout, os.Stderr
 	if cfg.Quiet {
-		// os.Stdout/Stderr are *os.File, not io.Writer, so route them at a
-		// real discard sink. /dev/null preserves the type and any caller that
-		// inspects the fd still sees a valid FILE*.
-		if devNull, derr := os.OpenFile(os.DevNull, os.O_WRONLY, 0); derr == nil {
-			os.Stdout, os.Stderr = devNull, devNull
-			defer func() {
-				os.Stdout, os.Stderr = origOut, origErr
-				devNull.Close()
-			}()
-		}
+		outW = io.Discard
+		errW = io.Discard
 	}
-	// Active scan configuration, read inside scanForTypos.
-	scanOpts.MinWordLength = cfg.MinWordLength
+	scanOpts := scanOptions{MinWordLength: cfg.MinWordLength, Verbose: cfg.Verbose}
 
 	dictionary, err := loadDictionary(cfg.Dictionary)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Fatal error loading dictionary: %v\n", err)
+		fmt.Fprintln(errW, fmt.Sprintf("Fatal error loading dictionary: %v", err))
 		return exitError
 	}
-	fmt.Fprintf(os.Stderr, "Successfully loaded %d words.\n", len(dictionary))
+	if cfg.Verbose {
+		fmt.Fprintf(errW, "Successfully loaded %d words.\n", len(dictionary))
+	}
 
 	if cfg.PersonalDictionary != "" {
 		count, err := loadPersonalDictionary(cfg.PersonalDictionary, dictionary)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading personal dictionary: %v\n", err)
+			fmt.Fprintf(errW, "Error loading personal dictionary: %v\n", err)
 			return exitError
 		}
-		fmt.Fprintf(os.Stderr, "Successfully loaded and merged %d words from personal dictionary.\n", count)
+		if cfg.Verbose {
+			fmt.Fprintf(errW, "Successfully loaded and merged %d words from personal dictionary.\n", count)
+		}
 	}
 
 	// --ignore-word: ad-hoc words treated as valid, merged (lowercased) into
@@ -331,20 +340,20 @@ func run(args []string) int {
 	// Watch mode: stay running and re-check files on change
 	if cfg.Watch {
 		if path == "-" {
-			fmt.Fprintln(os.Stderr, "Watch mode does not support stdin.")
+			fmt.Fprintln(errW, "Watch mode does not support stdin.")
 			return exitError
 		}
 		info, err := os.Stat(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Cannot access path: %v\n", err)
+			fmt.Fprintf(errW, "Cannot access path: %v\n", err)
 			return exitError
 		}
 		if !info.IsDir() {
-			fmt.Fprintln(os.Stderr, "Watch mode requires a directory path.")
+			fmt.Fprintln(errW, "Watch mode requires a directory path.")
 			return exitError
 		}
-		if err := runWatcher(path, dictionary, cfg.Exclude); err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
+		if err := runWatcherWithContext(ctx, path, dictionary, cfg.Exclude, outW, errW); err != nil {
+			fmt.Fprintln(errW, err)
 			return exitError
 		}
 		return exitOK
@@ -354,17 +363,15 @@ func run(args []string) int {
 	var checkErr error
 	var stdinData []byte
 	if path == "-" {
-		// Process stdin. Read the stream into a buffer once so checking and
-		// fixing both see the same input (second read of os.Stdin is empty).
 		stdinData, err = io.ReadAll(os.Stdin)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading stdin: %v\n", err)
+			fmt.Fprintf(errW, "Error reading stdin: %v\n", err)
 			return exitError
 		}
 		concurrentDict := NewConcurrentDictionary(dictionary)
-		typos, err := checkStdin(bytes.NewReader(stdinData), concurrentDict)
+		typos, err := checkStdin(bytes.NewReader(stdinData), concurrentDict, scanOpts)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error processing stdin: %v\n", err)
+			fmt.Fprintf(errW, "Error processing stdin: %v\n", err)
 			return exitError
 		}
 		allTypos = CheckResults{}
@@ -372,34 +379,41 @@ func run(args []string) int {
 			allTypos[stdinKey] = typos
 		}
 	} else {
-		// Process file or directory, or the git-changed file set when
-		// --git-diff is set. Individual file failures are aggregated into
-		// checkErr but successful files still come back in allTypos, so a
-		// report is produced for what could be scanned.
 		concurrentDict := NewConcurrentDictionary(dictionary)
 		if cfg.GitDiff != "" {
-			allTypos, checkErr = runGitDiffChecker(cfg.GitDiff, path, concurrentDict, cfg.Exclude, cfg.Verbose)
+			if cfg.OnlyChangedLines {
+				hunks, herr := gitDiffHunks(ctx, cfg.GitDiff)
+				if herr != nil {
+					fmt.Fprintf(errW, "git-diff error: %v\n", herr)
+					return exitError
+				}
+				changedLines := parseChangedLines(hunks)
+				allTypos, checkErr = runGitDiffCheckerWithHunks(ctx, cfg.GitDiff, path, concurrentDict, cfg.Exclude, cfg.Verbose, changedLines, scanOpts)
+			} else {
+				allTypos, checkErr = runGitDiffCheckerWithContext(ctx, cfg.GitDiff, path, concurrentDict, cfg.Exclude, cfg.Verbose, scanOpts)
+			}
 		} else {
-			allTypos, checkErr = runConcurrentCheckerWithDict(path, concurrentDict, cfg.Exclude, cfg.Verbose)
+			allTypos, checkErr = runConcurrentCheckerWithDictAndContext(ctx, path, concurrentDict, cfg.Exclude, cfg.Verbose, scanOpts)
 		}
 		if checkErr != nil {
-			// git-diff failure (not in repo, unknown ref) is a tooling
-			// error, not a spelling problem. allTypos is nil when git itself
-			// failed, as opposed to per-file errors during scanning which
-			// still produce a partial result map.
-			if cfg.GitDiff != "" && allTypos == nil {
-				fmt.Fprintf(os.Stderr, "git-diff error: %v\n", checkErr)
+			if errors.Is(checkErr, context.Canceled) {
+				fmt.Fprintln(errW, "Interrupted — partial results below.")
+			} else if cfg.GitDiff != "" && allTypos == nil {
+				fmt.Fprintf(errW, "git-diff error: %v\n", checkErr)
 				return exitError
-			}
-			// Same rule for the directory scan: nothing was scanned at all
-			// (missing/unreadable root, walk failure), so this is a tooling
-			// error, not a spelling problem. CI must be able to tell
-			// "couldn't run" (2) apart from "typos found" (1).
-			if allTypos == nil {
-				fmt.Fprintf(os.Stderr, "Error: could not scan %s: %v\n", path, checkErr)
+			} else if allTypos == nil {
+				fmt.Fprintf(errW, "Error: could not scan %s: %v\n", path, checkErr)
 				return exitError
+			} else {
+				fmt.Fprintf(errW, "Warning: some files could not be checked:\n%v\n", checkErr)
 			}
-			fmt.Fprintf(os.Stderr, "Warning: some files could not be checked:\n%v\n", checkErr)
+		}
+		select {
+		case <-ctx.Done():
+			if checkErr == nil {
+				checkErr = ctx.Err()
+			}
+		default:
 		}
 	}
 	// --- Fix mode: rewrite typos in place instead of producing a report ---
@@ -409,14 +423,14 @@ func run(args []string) int {
 			// Apply fixes to piped stdin, writing corrected stream to stdout.
 			_, skipped, err = fixStdin(bytes.NewReader(stdinData), allTypos[stdinKey])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error fixing stdin: %v\n", err)
+				fmt.Fprintf(errW, "Error fixing stdin: %v\n", err)
 				return exitError
 			}
 		} else {
 			_, skipped, err = runFixer(allTypos, cfg.DryRun)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fixing files: %v\n", err)
+			fmt.Fprintf(errW, "Error fixing files: %v\n", err)
 			return exitError
 		}
 		// Dry-run: signal typos via exit code 1 so CI still fails.
@@ -443,8 +457,8 @@ func run(args []string) int {
 			if stdoutFmt == FormatHTML {
 				stdoutFmt = FormatAuto
 			}
-			if err := writeReport(os.Stdout, allTypos, stdoutFmt); err != nil {
-				fmt.Fprintf(os.Stderr, "%v\n", err)
+			if err := writeReport(outW, allTypos, stdoutFmt); err != nil {
+				fmt.Fprintf(errW, "%v\n", err)
 				return exitError
 			}
 		} else {
@@ -462,9 +476,9 @@ func run(args []string) int {
 			isMultiFileDir := isHTML && ext != ".html"
 
 			if isMultiFileDir {
-				fmt.Printf("Generating multi-file HTML report in directory: %s\n", cfg.Output)
+				fmt.Fprintf(outW, "Generating multi-file HTML report in directory: %s\n", cfg.Output)
 				if err := generateMultiFileHTMLReport(cfg.Output, allTypos); err != nil {
-					fmt.Fprintf(os.Stderr, "Error generating multi-file report: %v\n", err)
+					fmt.Fprintf(errW, "Error generating multi-file report: %v\n", err)
 					return exitError
 				}
 			} else {
@@ -473,11 +487,11 @@ func run(args []string) int {
 				// here, when an output path was given.
 				file, err := os.Create(cfg.Output)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
+					fmt.Fprintf(errW, "Error creating output file: %v\n", err)
 					return exitError
 				}
 
-				fmt.Printf("Report will be saved to: %s\n", cfg.Output)
+				fmt.Fprintf(outW, "Report will be saved to: %s\n", cfg.Output)
 				outFmt := FormatAuto
 				switch {
 				case isHTML:
@@ -488,12 +502,12 @@ func run(args []string) int {
 					outFmt = FormatSarif
 				}
 				if err := writeReport(file, allTypos, outFmt); err != nil {
-					fmt.Fprintf(os.Stderr, "%v\n", err)
+					fmt.Fprintf(errW, "%v\n", err)
 					file.Close()
 					return exitError
 				}
 				if cerr := file.Close(); cerr != nil {
-					fmt.Fprintf(os.Stderr, "Error closing output file %s: %v\n", cfg.Output, cerr)
+					fmt.Fprintf(errW, "Error closing output file %s: %v\n", cfg.Output, cerr)
 					return exitError
 				}
 			}

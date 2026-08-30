@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -15,56 +16,49 @@ import (
 const debouncePeriod = 200 * time.Millisecond
 
 func runWatcher(rootPath string, dictionary map[string]struct{}, excludePatterns []string) error {
-	// Build the dictionary (and BK-tree) once, shared by the initial scan and
-	// the live re-checks.
-	concurrentDict := NewConcurrentDictionary(dictionary)
+	return runWatcherWithContext(context.Background(), rootPath, dictionary, excludePatterns, os.Stdout, os.Stderr)
+}
 
-	// Initial scan
-	fmt.Println("Performing initial scan...")
-	allTypos, err := runConcurrentCheckerWithDict(rootPath, concurrentDict, excludePatterns, false)
+func runWatcherWithContext(ctx context.Context, rootPath string, dictionary map[string]struct{}, excludePatterns []string, outW, errW io.Writer) error {
+	concurrentDict := NewConcurrentDictionary(dictionary)
+	fmt.Fprintln(outW, "Performing initial scan...")
+	allTypos, err := runConcurrentCheckerWithDictAndContext(ctx, rootPath, concurrentDict, excludePatterns, false, scanOptions{})
 	if err != nil {
 		return fmt.Errorf("initial scan failed: %w", err)
 	}
-
 	if len(allTypos) == 0 {
-		fmt.Println("  No typos found.")
+		fmt.Fprintln(outW, "  No typos found.")
 	} else {
-		if err := generateTextReport(os.Stdout, allTypos); err != nil {
-			fmt.Fprintf(os.Stderr, "Error generating report: %v\n", err)
+		if err := generateTextReport(outW, allTypos); err != nil {
+			fmt.Fprintf(errW, "Error generating report: %v\n", err)
 		}
-		fmt.Printf("\n%d file(s) have typos.\n", len(allTypos))
+		fmt.Fprintf(outW, "\n%d file(s) have typos.\n", len(allTypos))
 	}
-
-	// Set up fsnotify watcher
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
 	}
 	defer watcher.Close()
-
 	if err := addDirsToWatcher(watcher, rootPath, excludePatterns); err != nil {
 		return fmt.Errorf("failed to watch directories: %w", err)
 	}
-
-	fmt.Println("\nWatching for changes... (Ctrl+C to stop)")
-
+	fmt.Fprintln(outW, "\nWatching for changes... (Ctrl+C to stop)")
 	eventCh := make(chan string, 100)
-	go debounceAndProcess(eventCh, concurrentDict, os.Stdout)
-
-	// Main event loop
+	go debounceAndProcessWithContext(ctx, eventCh, concurrentDict, outW, errW)
 	for {
 		select {
+		case <-ctx.Done():
+			return nil
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil
 			}
 			handleWatchEvent(event, watcher, eventCh, excludePatterns)
-
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return nil
 			}
-			fmt.Fprintf(os.Stderr, "Watch error: %v\n", err)
+			fmt.Fprintf(errW, "Watch error: %v\n", err)
 		}
 	}
 }
@@ -88,7 +82,6 @@ func addDirsToWatcher(watcher *fsnotify.Watcher, rootPath string, excludePattern
 		return watcher.Add(path)
 	})
 }
-
 func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh chan<- string, excludePatterns []string) {
 	// Editors save in many ways: direct writes, or write-temp-then-rename
 	// (atomic save). Cover Write, Create, Rename, and Remove so saves and
@@ -135,20 +128,32 @@ func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh c
 }
 
 func debounceAndProcess(eventCh <-chan string, dict *ConcurrentDictionary, out io.Writer) {
-	// Collect rapid events into a unique set, then process once the stream
-	// goes quiet for debouncePeriod.
+	debounceAndProcessWithContext(context.Background(), eventCh, dict, out, os.Stderr)
+}
+
+func debounceAndProcessWithContext(ctx context.Context, eventCh <-chan string, dict *ConcurrentDictionary, out io.Writer, errW io.Writer) {
 	pending := make(map[string]struct{})
 	var timer *time.Timer
-
 	for {
 		if timer == nil {
-			path := <-eventCh
-			pending[path] = struct{}{}
-			timer = time.NewTimer(debouncePeriod)
-			continue
+			select {
+			case <-ctx.Done():
+				return
+			case path := <-eventCh:
+				pending[path] = struct{}{}
+				timer = time.NewTimer(debouncePeriod)
+				continue
+			}
 		}
-
 		select {
+		case <-ctx.Done():
+			if len(pending) > 0 {
+				processBatch(pending, dict, out)
+			}
+			if timer != nil {
+				timer.Stop()
+			}
+			return
 		case path := <-eventCh:
 			pending[path] = struct{}{}
 			if !timer.Stop() {

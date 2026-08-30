@@ -102,7 +102,7 @@ func BenchmarkScanForTypos(b *testing.B) {
 		"Hello worl, this is a tset of teh speling checker. ", 100)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = scanForTypos(strings.NewReader(text), cd)
+		_, _ = scanForTypos(strings.NewReader(text), cd, scanOptions{})
 	}
 }
 

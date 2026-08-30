@@ -26,6 +26,9 @@ func treeCacheKey(dict map[string]struct{}) string {
 	}
 	sort.Strings(words)
 	h := sha256.New()
+	var verBuf [4]byte
+	binary.BigEndian.PutUint32(verBuf[:], uint32(treeCacheVersion))
+	h.Write(verBuf[:])
 	var lenBuf [4]byte
 	for _, w := range words {
 		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(w)))

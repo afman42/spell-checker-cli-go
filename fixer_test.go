@@ -183,8 +183,8 @@ func TestWriteAtomic(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := writeAtomic(path, "new content"); err != nil {
-		t.Fatalf("writeAtomic: %v", err)
+	if err := writeFileAtomic(path, "new content", true); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
 	}
 	got, _ := os.ReadFile(path)
 	if string(got) != "new content" {
@@ -237,7 +237,7 @@ func TestFixStdinPreservesHugeLine(t *testing.T) {
 	input := "hello wrld\n" + huge + "\ndone wrld\n"
 
 	dict := map[string]struct{}{"hello": {}, "world": {}, "done": {}}
-	typos, err := scanForTypos(strings.NewReader(input), NewConcurrentDictionary(dict))
+	typos, err := scanForTypos(strings.NewReader(input), NewConcurrentDictionary(dict), scanOptions{})
 	if err != nil {
 		t.Fatalf("scanForTypos: %v", err)
 	}
