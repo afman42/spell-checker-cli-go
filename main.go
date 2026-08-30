@@ -276,7 +276,7 @@ func runWithContext(ctx context.Context, args []string, outW, errW io.Writer) in
 	// --- Load Configuration ---
 	cfg, positionals, err := loadConfig(args)
 	if err != nil {
-		fmt.Fprintln(errW, fmt.Sprintf("Fatal error loading configuration: %v", err))
+		fmt.Fprintf(errW, "Fatal error loading configuration: %v\n", err)
 		return exitError
 	}
 
@@ -293,7 +293,7 @@ func runWithContext(ctx context.Context, args []string, outW, errW io.Writer) in
 
 	dictionary, err := loadDictionary(cfg.Dictionary)
 	if err != nil {
-		fmt.Fprintln(errW, fmt.Sprintf("Fatal error loading dictionary: %v", err))
+		fmt.Fprintf(errW, "Fatal error loading dictionary: %v\n", err)
 		return exitError
 	}
 	if cfg.Verbose {
