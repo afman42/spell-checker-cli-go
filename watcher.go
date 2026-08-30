@@ -15,10 +15,6 @@ import (
 
 const debouncePeriod = 200 * time.Millisecond
 
-func runWatcher(rootPath string, dictionary map[string]struct{}, excludePatterns []string) error {
-	return runWatcherWithContext(context.Background(), rootPath, dictionary, excludePatterns, os.Stdout, os.Stderr)
-}
-
 func runWatcherWithContext(ctx context.Context, rootPath string, dictionary map[string]struct{}, excludePatterns []string, outW, errW io.Writer) error {
 	concurrentDict := NewConcurrentDictionary(dictionary)
 	fmt.Fprintln(outW, "Performing initial scan...")
