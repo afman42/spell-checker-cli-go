@@ -161,13 +161,6 @@ func runConcurrentCheckerWithDictAndContext(ctx context.Context, rootPath string
 	return runCheckerOnFilesWithContext(ctx, allFiles, concurrentDict, verbose, opts)
 }
 
-// runCheckerOnFiles runs the worker pool over an already-collected list of
-// files. Shared by the directory walk (runConcurrentCheckerWithDict) and the
-// --git-diff path (runGitDiffChecker), which supplies its own file list.
-func runCheckerOnFiles(files []string, concurrentDict *ConcurrentDictionary, verbose bool) (CheckResults, error) {
-	return runCheckerOnFilesWithContext(context.Background(), files, concurrentDict, verbose, scanOptions{})
-}
-
 func runCheckerOnFilesWithContext(ctx context.Context, files []string, concurrentDict *ConcurrentDictionary, verbose bool, opts scanOptions) (CheckResults, error) {
 	if len(files) == 0 {
 		return make(CheckResults), nil
@@ -564,10 +557,6 @@ func isStderrTerminal() bool {
 // aggregation without touching the file system; production code only ever sees
 // checkFile.
 var checkFileFunc = checkFile
-
-func worker(wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary) {
-	workerWithContext(context.Background(), wg, jobs, results, dictionary, scanOptions{}, nil)
-}
 
 func workerWithContext(ctx context.Context, wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary, opts scanOptions, changedLines ChangedLines) {
 	defer wg.Done()
