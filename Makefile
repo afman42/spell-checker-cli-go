@@ -12,6 +12,8 @@
 #   bench-cmp     Compare zstd decompression benchmarks (load vs raw)
 #   vet           Run go vet ./...
 #   fmt           Format all Go source files
+#   lint          Run golangci-lint
+#   vuln          Run govulncheck
 #   dict          Regenerate the embedded dictionary from dictionary.csv
 #   clean         Remove build artifacts
 #   all           Default: build + test
@@ -104,6 +106,21 @@ fmt-check:
 .PHONY: staticcheck
 staticcheck:
 	go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 ./...
+
+# Prefer an installed golangci-lint; `go run` pays a ~11 min rebuild each time.
+GOLANGCI := $(shell command -v golangci-lint 2>/dev/null)
+
+.PHONY: lint
+lint:
+ifeq ($(GOLANGCI),)
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run ./...
+else
+	$(GOLANGCI) run ./...
+endif
+
+.PHONY: vuln
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
 # -------------------------------------------------------------------
 # Testing
