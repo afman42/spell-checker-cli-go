@@ -407,6 +407,8 @@ crash never leaves a half-written file.
 | `make fmt` | Format all Go source files |
 | `make fmt-check` | Verify all files are `go fmt`-compliant (CI-safe) |
 | `make staticcheck` | Run static analysis |
+| `make lint` | Run `golangci-lint` (config: `.golangci.yml`) |
+| `make vuln` | Run `govulncheck` vulnerability scan |
 | `make bench` | Run all benchmarks (`-bench=.`, 3 runs) |
 | `make bench-cmp` | Run zstd decompression benchmarks |
 | `make dict` | Regenerate `dictionary.txt.zst` from `dictionary.csv` |
@@ -458,6 +460,7 @@ git commit --no-verify
 ├── sarif_report_test.go     SARIF report shape tests
 ├── spellignore_test.go      .spellignore loader tests
 ├── Makefile                 Build, test, lint, benchmark targets
+├── .golangci.yml            golangci-lint config (errcheck exclusions)
 ├── dictionary.txt.zst       Embedded word list (zstd-compressed, 324 KB)
 ├── dictionary.csv           Source CSV for dictionary generation
 ├── dictionary_bench_test.go Decompression speed benchmarks (zstd)
@@ -490,7 +493,7 @@ git commit --no-verify
 
 The GitHub Actions workflow at `.github/workflows/build.yml`:
 
-- **Tests** — formatting, `go vet`, `staticcheck`, tests with race detector, code coverage
+- **Tests** — formatting, `go vet`, `staticcheck`, `golangci-lint`, `govulncheck`, tests with race detector, code coverage
 - **Builds** — cross-compiles for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
 - **UPX** — compresses Linux binaries with UPX 5.2.0
 - **Integration tests** — runs the binary against test fixtures with various flags
