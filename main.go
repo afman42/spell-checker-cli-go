@@ -418,7 +418,8 @@ func runWithContext(ctx context.Context, args []string, outW, errW io.Writer) in
 	}
 	// --- Fix mode: rewrite typos in place instead of producing a report ---
 	if cfg.Fix {
-		var skipped, err = 0, error(nil)
+		var skipped int
+		var err error
 		if path == "-" {
 			// Apply fixes to piped stdin, writing corrected stream to stdout.
 			_, skipped, err = fixStdin(bytes.NewReader(stdinData), allTypos[stdinKey])

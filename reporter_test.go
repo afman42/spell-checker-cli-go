@@ -47,7 +47,7 @@ func TestGenerateTextReportDeterminism(t *testing.T) {
 	if iAlpha < 0 || iMid < 0 || iZebra < 0 {
 		t.Fatalf("missing file headers in output:\n%s", out)
 	}
-	if !(iAlpha < iMid && iMid < iZebra) {
+	if iAlpha >= iMid || iMid >= iZebra {
 		t.Errorf("text report not sorted: alpha=%d mid=%d zebra=%d\n%s", iAlpha, iMid, iZebra, out)
 	}
 }

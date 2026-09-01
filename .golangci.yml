@@ -1,0 +1,24 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Deferred Close on read paths and Fprint into errWriter (which records
+      # the first error in w.err and returns it) are intentional.
+      exclude-functions:
+        - (*os.File).Close
+        - (*github.com/fsnotify/fsnotify.Watcher).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Best-effort: temp-file cleanup after a successful rename is a no-op,
+        # and the overlong-line sink is a diagnostic tap, not a data path.
+        - os.Remove
+        - (io.Writer).Write
+  exclusions:
+    rules:
+      # Test helpers use pipes and Chdir where a failed cleanup fails the test
+      # anyway; checking every return adds noise, not safety.
+      - path: _test\.go
+        linters:
+          - errcheck
