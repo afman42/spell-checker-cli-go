@@ -41,6 +41,14 @@ jobs:
       - name: Run staticcheck
         run: make staticcheck
 
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.13.2
+
+      - name: Run govulncheck
+        run: make vuln
+
       - name: Run tests with race detector and coverage
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 
