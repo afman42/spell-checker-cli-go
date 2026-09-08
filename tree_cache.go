@@ -69,6 +69,12 @@ func readBKTreeCacheAt(path string) (*BKTree, error) {
 	if err := gob.NewDecoder(io.LimitReader(f, maxTreeCacheBytes+1)).Decode(&tree); err != nil {
 		return nil, err
 	}
+	// Post-decode sanity check: a malicious or corrupt cache must not
+	// propagate a tree with absurd node counts. The embedded dictionary
+	// has ~100k words; anything orders of magnitude larger is suspect.
+	if tree.Root != nil && len(tree.Root.Children) > 1_000_000 {
+		return nil, fmt.Errorf("cache rejected: implausible tree structure")
+	}
 	return &tree, nil
 }
 

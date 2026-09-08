@@ -375,7 +375,7 @@ func runCheckerOnFilesWithHunks(ctx context.Context, files []string, concurrentD
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
-		go workerWithHunks(ctx, &wg, jobs, results, concurrentDict, changedLines, opts)
+		go workerWithContext(ctx, &wg, jobs, results, concurrentDict, opts, changedLines)
 	}
 	go func() {
 		defer close(jobs)
@@ -587,10 +587,6 @@ func workerWithContext(ctx context.Context, wg *sync.WaitGroup, jobs <-chan stri
 		case results <- CheckResult{FilePath: path, Typos: typos, Err: err}:
 		}
 	}
-}
-
-func workerWithHunks(ctx context.Context, wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary, changedLines ChangedLines, opts scanOptions) {
-	workerWithContext(ctx, wg, jobs, results, dictionary, opts, changedLines)
 }
 
 func checkFile(filePath string, dictionary *ConcurrentDictionary) ([]MisspelledWord, error) {
