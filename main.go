@@ -17,7 +17,7 @@ import (
 )
 
 // versionString reported by --version.
-const versionString = "spell-checker-cli v1.0.0"
+const versionString = "spell-checker-cli v.1.1.2"
 
 // OutputFormat represents valid output formats
 type OutputFormat string
