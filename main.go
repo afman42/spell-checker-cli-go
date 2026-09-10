@@ -291,34 +291,9 @@ func runWithContext(ctx context.Context, args []string, outW, errW io.Writer) in
 	}
 	scanOpts := scanOptions{MinWordLength: cfg.MinWordLength, Verbose: cfg.Verbose}
 
-	dictionary, err := loadDictionary(cfg.Dictionary)
+	dictionary, err := buildDictionary(cfg, errW)
 	if err != nil {
-		fmt.Fprintf(errW, "Fatal error loading dictionary: %v\n", err)
 		return exitError
-	}
-	if cfg.Verbose {
-		fmt.Fprintf(errW, "Successfully loaded %d words.\n", len(dictionary))
-	}
-
-	if cfg.PersonalDictionary != "" {
-		count, err := loadPersonalDictionary(cfg.PersonalDictionary, dictionary)
-		if err != nil {
-			fmt.Fprintf(errW, "Error loading personal dictionary: %v\n", err)
-			return exitError
-		}
-		if cfg.Verbose {
-			fmt.Fprintf(errW, "Successfully loaded and merged %d words from personal dictionary.\n", count)
-		}
-	}
-
-	// --ignore-word: ad-hoc words treated as valid, merged (lowercased) into
-	// the shared dictionary so the ConcurrentDictionary treats them as known.
-	for _, w := range cfg.IgnoreWords {
-		for _, tok := range strings.Split(w, ",") {
-			if t := strings.TrimSpace(tok); t != "" {
-				dictionary[strings.ToLower(t)] = struct{}{}
-			}
-		}
 	}
 
 	if len(positionals) < 1 {
@@ -359,164 +334,244 @@ func runWithContext(ctx context.Context, args []string, outW, errW io.Writer) in
 		return exitOK
 	}
 
-	var allTypos CheckResults
-	var checkErr error
-	var stdinData []byte
-	if path == "-" {
-		stdinData, err = io.ReadAll(os.Stdin)
-		if err != nil {
-			fmt.Fprintf(errW, "Error reading stdin: %v\n", err)
-			return exitError
-		}
-		concurrentDict := NewConcurrentDictionary(dictionary)
-		typos, err := checkStdin(bytes.NewReader(stdinData), concurrentDict, scanOpts)
-		if err != nil {
-			fmt.Fprintf(errW, "Error processing stdin: %v\n", err)
-			return exitError
-		}
-		allTypos = CheckResults{}
-		if len(typos) > 0 {
-			allTypos[stdinKey] = typos
-		}
-	} else {
-		concurrentDict := NewConcurrentDictionary(dictionary)
-		if cfg.GitDiff != "" {
-			if cfg.OnlyChangedLines {
-				hunks, herr := gitDiffHunks(ctx, cfg.GitDiff)
-				if herr != nil {
-					fmt.Fprintf(errW, "git-diff error: %v\n", herr)
-					return exitError
-				}
-				changedLines := parseChangedLines(hunks)
-				allTypos, checkErr = runGitDiffCheckerWithHunks(ctx, cfg.GitDiff, path, concurrentDict, cfg.Exclude, cfg.Verbose, changedLines, scanOpts)
-			} else {
-				allTypos, checkErr = runGitDiffCheckerWithContext(ctx, cfg.GitDiff, path, concurrentDict, cfg.Exclude, cfg.Verbose, scanOpts)
-			}
-		} else {
-			allTypos, checkErr = runConcurrentCheckerWithDictAndContext(ctx, path, concurrentDict, cfg.Exclude, cfg.Verbose, scanOpts)
-		}
-		if checkErr != nil {
-			if errors.Is(checkErr, context.Canceled) {
-				fmt.Fprintln(errW, "Interrupted — partial results below.")
-			} else if cfg.GitDiff != "" && allTypos == nil {
-				fmt.Fprintf(errW, "git-diff error: %v\n", checkErr)
-				return exitError
-			} else if allTypos == nil {
-				fmt.Fprintf(errW, "Error: could not scan %s: %v\n", path, checkErr)
-				return exitError
-			} else {
-				fmt.Fprintf(errW, "Warning: some files could not be checked:\n%v\n", checkErr)
-			}
-		}
-		select {
-		case <-ctx.Done():
-			if checkErr == nil {
-				checkErr = ctx.Err()
-			}
-		default:
-		}
+	scan := dispatchScan(ctx, cfg, path, dictionary, scanOpts, errW)
+	if scan.fatal {
+		return exitError
 	}
+	allTypos, stdinData, checkErr := scan.results, scan.stdinData, scan.checkErr
 	// --- Fix mode: rewrite typos in place instead of producing a report ---
 	if cfg.Fix {
-		var skipped int
-		var err error
-		if path == "-" {
-			// Apply fixes to piped stdin, writing corrected stream to stdout.
-			_, skipped, err = fixStdin(bytes.NewReader(stdinData), allTypos[stdinKey])
-			if err != nil {
-				fmt.Fprintf(errW, "Error fixing stdin: %v\n", err)
-				return exitError
-			}
-		} else {
-			_, skipped, err = runFixer(allTypos, cfg.DryRun)
-		}
-		if err != nil {
-			fmt.Fprintf(errW, "Error fixing files: %v\n", err)
-			return exitError
-		}
-		// Dry-run: signal typos via exit code 1 so CI still fails.
-		// Real fix: exit 0 only if every typo was correctable. Skipped typos
-		// (no suggestion) remain in the files, so CI should fail to surface
-		// them for manual review. Unscanned files also fail CI.
-		if cfg.DryRun && (len(allTypos) > 0 || checkErr != nil) {
-			return exitTypos
-		}
-		if !cfg.DryRun && (skipped > 0 || checkErr != nil) {
-			return exitTypos
-		}
-		return exitOK
+		return applyFixes(cfg, path, stdinData, allTypos, checkErr, errW)
 	}
 
-	// If scanning failed before collecting anything (e.g. a missing root path),
-	// the warning above is the report; don't emit a misleading "No typos found".
-	if len(allTypos) > 0 || checkErr == nil {
-		if cfg.Output == "" {
-			// Default case: no output path. Print to stdout in the chosen
-			// format. Quirk: --format html without --output still prints
-			// plain text; HTML is only produced when writing a file.
-			stdoutFmt := cfg.Format
-			if stdoutFmt == FormatHTML {
-				stdoutFmt = FormatAuto
-			}
-			if err := writeReport(outW, allTypos, stdoutFmt); err != nil {
-				fmt.Fprintf(errW, "%v\n", err)
-				return exitError
-			}
-		} else {
-			// An output path was provided. Determine the format and mode.
-			format := string(cfg.Format)
-			ext := strings.ToLower(filepath.Ext(cfg.Output))
-
-			// Determine if the desired format is HTML.
-			isHTML := format == string(FormatHTML) || (format == string(FormatAuto) && ext == ".html")
-			isJSON := format == string(FormatJSON) || (format == string(FormatAuto) && ext == ".json")
-			isSARIF := format == string(FormatSarif) || (format == string(FormatAuto) && ext == ".sarif")
-
-			// Determine if we should use the multi-file directory mode for HTML.
-			// This is triggered if the format is HTML AND the path does not end in ".html".
-			isMultiFileDir := isHTML && ext != ".html"
-
-			if isMultiFileDir {
-				fmt.Fprintf(outW, "Generating multi-file HTML report in directory: %s\n", cfg.Output)
-				if err := generateMultiFileHTMLReport(cfg.Output, allTypos); err != nil {
-					fmt.Fprintf(errW, "Error generating multi-file report: %v\n", err)
-					return exitError
-				}
-			} else {
-				// Single-file output for text, JSON, or a specific HTML file.
-				// Extension-based auto-detection (FormatAuto) applies only
-				// here, when an output path was given.
-				file, err := os.Create(cfg.Output)
-				if err != nil {
-					fmt.Fprintf(errW, "Error creating output file: %v\n", err)
-					return exitError
-				}
-
-				fmt.Fprintf(outW, "Report will be saved to: %s\n", cfg.Output)
-				outFmt := FormatAuto
-				switch {
-				case isHTML:
-					outFmt = FormatHTML
-				case isJSON:
-					outFmt = FormatJSON
-				case isSARIF:
-					outFmt = FormatSarif
-				}
-				if err := writeReport(file, allTypos, outFmt); err != nil {
-					fmt.Fprintf(errW, "%v\n", err)
-					file.Close()
-					return exitError
-				}
-				if cerr := file.Close(); cerr != nil {
-					fmt.Fprintf(errW, "Error closing output file %s: %v\n", cfg.Output, cerr)
-					return exitError
-				}
-			}
-		}
+	if emitReport(cfg, allTypos, checkErr, outW, errW) {
+		return exitError
 	}
 
 	if len(allTypos) > 0 || checkErr != nil {
 		return exitTypos
 	}
 	return exitOK
+}
+
+// buildDictionary assembles the run's word set: embedded or --dict custom,
+// plus --personal-dict and --ignore-word merges. Failure messages keep their
+// historical wording and are reported to errW here; the caller only maps the
+// error to an exit code.
+func buildDictionary(cfg *Config, errW io.Writer) (map[string]struct{}, error) {
+	dictionary, err := loadDictionary(cfg.Dictionary)
+	if err != nil {
+		fmt.Fprintf(errW, "Fatal error loading dictionary: %v\n", err)
+		return nil, err
+	}
+	if cfg.Verbose {
+		fmt.Fprintf(errW, "Successfully loaded %d words.\n", len(dictionary))
+	}
+
+	if cfg.PersonalDictionary != "" {
+		count, err := loadPersonalDictionary(cfg.PersonalDictionary, dictionary)
+		if err != nil {
+			fmt.Fprintf(errW, "Error loading personal dictionary: %v\n", err)
+			return nil, err
+		}
+		if cfg.Verbose {
+			fmt.Fprintf(errW, "Successfully loaded and merged %d words from personal dictionary.\n", count)
+		}
+	}
+
+	// --ignore-word: ad-hoc words treated as valid, merged (lowercased) into
+	// the shared dictionary so the ConcurrentDictionary treats them as known.
+	for _, w := range cfg.IgnoreWords {
+		for _, tok := range strings.Split(w, ",") {
+			if t := strings.TrimSpace(tok); t != "" {
+				dictionary[strings.ToLower(t)] = struct{}{}
+			}
+		}
+	}
+	return dictionary, nil
+}
+
+// scanOutcome carries what a scan produced. fatal marks a failure that must
+// abort the run (exit 2) with its message already reported to errW; otherwise
+// checkErr holds partial-scan errors for the exit-code decision downstream.
+type scanOutcome struct {
+	results   CheckResults
+	stdinData []byte
+	checkErr  error
+	fatal     bool
+}
+
+// dispatchScan selects the scan mode (stdin, --git-diff, or directory walk)
+// and runs it against the shared dictionary. stdinData is returned because
+// fix mode rewrites piped input from the same bytes.
+func dispatchScan(ctx context.Context, cfg *Config, path string, dictionary map[string]struct{}, scanOpts scanOptions, errW io.Writer) scanOutcome {
+	if path == "-" {
+		stdinData, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(errW, "Error reading stdin: %v\n", err)
+			return scanOutcome{fatal: true}
+		}
+		concurrentDict := NewConcurrentDictionary(dictionary)
+		typos, err := checkStdin(bytes.NewReader(stdinData), concurrentDict, scanOpts)
+		if err != nil {
+			fmt.Fprintf(errW, "Error processing stdin: %v\n", err)
+			return scanOutcome{fatal: true}
+		}
+		allTypos := CheckResults{}
+		if len(typos) > 0 {
+			allTypos[stdinKey] = typos
+		}
+		return scanOutcome{results: allTypos, stdinData: stdinData}
+	}
+
+	var allTypos CheckResults
+	var checkErr error
+	concurrentDict := NewConcurrentDictionary(dictionary)
+	if cfg.GitDiff != "" {
+		if cfg.OnlyChangedLines {
+			hunks, herr := gitDiffHunks(ctx, cfg.GitDiff)
+			if herr != nil {
+				fmt.Fprintf(errW, "git-diff error: %v\n", herr)
+				return scanOutcome{fatal: true}
+			}
+			changedLines := parseChangedLines(hunks)
+			allTypos, checkErr = runGitDiffCheckerWithHunks(ctx, cfg.GitDiff, path, concurrentDict, cfg.Exclude, cfg.Verbose, changedLines, scanOpts)
+		} else {
+			allTypos, checkErr = runGitDiffCheckerWithContext(ctx, cfg.GitDiff, path, concurrentDict, cfg.Exclude, cfg.Verbose, scanOpts)
+		}
+	} else {
+		allTypos, checkErr = runConcurrentCheckerWithDictAndContext(ctx, path, concurrentDict, cfg.Exclude, cfg.Verbose, scanOpts)
+	}
+	if checkErr != nil {
+		if errors.Is(checkErr, context.Canceled) {
+			fmt.Fprintln(errW, "Interrupted — partial results below.")
+		} else if cfg.GitDiff != "" && allTypos == nil {
+			fmt.Fprintf(errW, "git-diff error: %v\n", checkErr)
+			return scanOutcome{fatal: true}
+		} else if allTypos == nil {
+			fmt.Fprintf(errW, "Error: could not scan %s: %v\n", path, checkErr)
+			return scanOutcome{fatal: true}
+		} else {
+			fmt.Fprintf(errW, "Warning: some files could not be checked:\n%v\n", checkErr)
+		}
+	}
+	select {
+	case <-ctx.Done():
+		if checkErr == nil {
+			checkErr = ctx.Err()
+		}
+	default:
+	}
+	return scanOutcome{results: allTypos, checkErr: checkErr}
+}
+
+// applyFixes is the --fix terminal branch: it rewrites typos in place (or
+// previews with --dry-run) and returns the exit code. Skipped typos and
+// partial scan failures keep CI red.
+func applyFixes(cfg *Config, path string, stdinData []byte, allTypos CheckResults, checkErr error, errW io.Writer) int {
+	var skipped int
+	var err error
+	if path == "-" {
+		// Apply fixes to piped stdin, writing corrected stream to stdout.
+		_, skipped, err = fixStdin(bytes.NewReader(stdinData), allTypos[stdinKey])
+		if err != nil {
+			fmt.Fprintf(errW, "Error fixing stdin: %v\n", err)
+			return exitError
+		}
+	} else {
+		_, skipped, err = runFixer(allTypos, cfg.DryRun)
+	}
+	if err != nil {
+		fmt.Fprintf(errW, "Error fixing files: %v\n", err)
+		return exitError
+	}
+	// Dry-run: signal typos via exit code 1 so CI still fails.
+	// Real fix: exit 0 only if every typo was correctable. Skipped typos
+	// (no suggestion) remain in the files, so CI should fail to surface
+	// them for manual review. Unscanned files also fail CI.
+	if cfg.DryRun && (len(allTypos) > 0 || checkErr != nil) {
+		return exitTypos
+	}
+	if !cfg.DryRun && (skipped > 0 || checkErr != nil) {
+		return exitTypos
+	}
+	return exitOK
+}
+
+// emitReport renders results to stdout or --output, keeping the historical
+// format/extension detection exactly (including the --format html without
+// --output printing plain text). Returns true when a failure was already
+// reported and the caller must exit 2.
+func emitReport(cfg *Config, allTypos CheckResults, checkErr error, outW, errW io.Writer) bool {
+	// If scanning failed before collecting anything (e.g. a missing root path),
+	// the warning above is the report; don't emit a misleading "No typos found".
+	if len(allTypos) == 0 && checkErr != nil {
+		return false
+	}
+	if cfg.Output == "" {
+		// Default case: no output path. Print to stdout in the chosen
+		// format. Quirk: --format html without --output still prints
+		// plain text; HTML is only produced when writing a file.
+		stdoutFmt := cfg.Format
+		if stdoutFmt == FormatHTML {
+			stdoutFmt = FormatAuto
+		}
+		if err := writeReport(outW, allTypos, stdoutFmt); err != nil {
+			fmt.Fprintf(errW, "%v\n", err)
+			return true
+		}
+		return false
+	}
+
+	// An output path was provided. Determine the format and mode.
+	format := string(cfg.Format)
+	ext := strings.ToLower(filepath.Ext(cfg.Output))
+
+	// Determine if the desired format is HTML.
+	isHTML := format == string(FormatHTML) || (format == string(FormatAuto) && ext == ".html")
+	isJSON := format == string(FormatJSON) || (format == string(FormatAuto) && ext == ".json")
+	isSARIF := format == string(FormatSarif) || (format == string(FormatAuto) && ext == ".sarif")
+
+	// Determine if we should use the multi-file directory mode for HTML.
+	// This is triggered if the format is HTML AND the path does not end in ".html".
+	isMultiFileDir := isHTML && ext != ".html"
+
+	if isMultiFileDir {
+		fmt.Fprintf(outW, "Generating multi-file HTML report in directory: %s\n", cfg.Output)
+		if err := generateMultiFileHTMLReport(cfg.Output, allTypos); err != nil {
+			fmt.Fprintf(errW, "Error generating multi-file report: %v\n", err)
+			return true
+		}
+		return false
+	}
+
+	// Single-file output for text, JSON, or a specific HTML file.
+	// Extension-based auto-detection (FormatAuto) applies only
+	// here, when an output path was given.
+	file, err := os.Create(cfg.Output)
+	if err != nil {
+		fmt.Fprintf(errW, "Error creating output file: %v\n", err)
+		return true
+	}
+
+	fmt.Fprintf(outW, "Report will be saved to: %s\n", cfg.Output)
+	outFmt := FormatAuto
+	switch {
+	case isHTML:
+		outFmt = FormatHTML
+	case isJSON:
+		outFmt = FormatJSON
+	case isSARIF:
+		outFmt = FormatSarif
+	}
+	if err := writeReport(file, allTypos, outFmt); err != nil {
+		fmt.Fprintf(errW, "%v\n", err)
+		file.Close()
+		return true
+	}
+	if cerr := file.Close(); cerr != nil {
+		fmt.Fprintf(errW, "Error closing output file %s: %v\n", cfg.Output, cerr)
+		return true
+	}
+	return false
 }
