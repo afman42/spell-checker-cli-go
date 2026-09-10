@@ -17,9 +17,9 @@ Audit all 15 Go source files (~7000 LOC) in spell-checker-cli-go for:
 | ------- | ------ | ------ |
 | Config | CLI flags + YAML merge, validation | main.go |
 | Dictionary | Load embedded/custom/personal word lists | dictionary.go |
-| ConcurrentDictionary | Thread-safe wrapper, lazy BK-tree | checker.go |
+| ConcurrentDictionary | Thread-safe wrapper, lazy BK-tree | dictionary.go |
 | BKTree | Fuzzy search index | suggestions.go |
-| Checker | File walk, tokenize, detect typos | checker.go |
+| Checker | File walk, tokenize, detect typos | scan.go, runners.go, filegate.go |
 | Fixer | Rewrite typos in-place, atomic write | fixer.go |
 | Reporter | Text/HTML/JSON/SARIF output | reporter.go, sarif.go |
 | Watcher | fsnotify loop, debounce, re-scan | watcher.go |

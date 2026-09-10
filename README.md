@@ -434,9 +434,11 @@ git commit --no-verify
 ### Project structure
 
 ```
-├── main.go              Entry point, config, output routing
-├── checker.go           Scanner, concurrent worker pool, word tokenizer, binary detection
-├── dictionary.go        Dictionary loading (zstd-compressed embedded dict)
+├── main.go              Entry point, config, output routing, run-mode dispatch
+├── scan.go              Scan core: line reader, tokenizer, checkFile, checkStdin
+├── runners.go           Scan modes: directory walk, git-diff, hunk-scoped, worker pool, progress bar
+├── filegate.go          File filtering: exclude globs, binary detection, word tokenizer regex
+├── dictionary.go        Dictionary loading (zstd-compressed embedded dict) + ConcurrentDictionary
 ├── suggestions.go       BK-tree + Levenshtein distance for suggestions
 ├── tree_cache.go        On-disk persistence of the built suggestion tree
 ├── fixer.go             Auto-fix with atomic writes (--fix)
