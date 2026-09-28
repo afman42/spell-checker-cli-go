@@ -21,12 +21,7 @@ func detectTypos(t *testing.T, path string, dict map[string]struct{}) []Misspell
 // TestFixFileReplacesTypos verifies typos are replaced with their top suggestion
 // and the rest of the line (including non-word chars) is preserved.
 func TestFixFileReplacesTypos(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "doc.txt")
-	original := "hello wrld!\nthis is a tset, ok?\n"
-	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	path := writeTempFile(t, "doc.txt", "hello wrld!\nthis is a tset, ok?\n")
 
 	// "wrld" -> "world", "tset"/"tset" not relevant; we want "tset" but the text
 	// has "tset"? No: text has "tset"? It's "tset" -> use a dictionary where the
@@ -60,15 +55,10 @@ func TestFixFileReplacesTypos(t *testing.T) {
 
 // TestFixFileDryRunLeavesFileUnchanged verifies dry-run reports fixes but writes nothing.
 func TestFixFileDryRunLeavesFileUnchanged(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "doc.txt")
+	path := writeTempFile(t, "doc.txt", "hello wrld\n")
 	original := "hello wrld\n"
-	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
 
-	dict := map[string]struct{}{"hello": {}, "world": {}}
-	typos := detectTypos(t, path, dict)
+	typos := detectTypos(t, path, map[string]struct{}{"hello": {}, "world": {}})
 
 	res, err := fixFile(path, typos, true) // dryRun
 	if err != nil {
@@ -87,16 +77,11 @@ func TestFixFileDryRunLeavesFileUnchanged(t *testing.T) {
 // TestFixFileSkipsNoSuggestion verifies typos with no suggestion are left in place
 // and counted as skipped.
 func TestFixFileSkipsNoSuggestion(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "doc.txt")
 	original := "zzzzzzzz qwxyz\n"
-	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	path := writeTempFile(t, "doc.txt", original)
 
 	// Dictionary shares no near words, so no suggestions are produced.
-	dict := map[string]struct{}{"completely": {}, "different": {}}
-	typos := detectTypos(t, path, dict)
+	typos := detectTypos(t, path, map[string]struct{}{"completely": {}, "different": {}})
 	if len(typos) == 0 {
 		t.Fatal("expected typos")
 	}

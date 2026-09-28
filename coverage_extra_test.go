@@ -121,7 +121,8 @@ func TestHandleWatchEventRouting(t *testing.T) {
 	if err := os.WriteFile(txt, []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	handleWatchEvent(fsnotify.Event{Name: txt, Op: fsnotify.Write}, watcher, ch, patterns)
+	var errW bytes.Buffer
+	handleWatchEvent(fsnotify.Event{Name: txt, Op: fsnotify.Write}, watcher, ch, patterns, &errW)
 	select {
 	case got := <-ch:
 		if got != txt {
@@ -136,7 +137,7 @@ func TestHandleWatchEventRouting(t *testing.T) {
 	if err := os.WriteFile(logFile, []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	handleWatchEvent(fsnotify.Event{Name: logFile, Op: fsnotify.Write}, watcher, ch, patterns)
+	handleWatchEvent(fsnotify.Event{Name: logFile, Op: fsnotify.Write}, watcher, ch, patterns, &errW)
 	select {
 	case got := <-ch:
 		t.Errorf("excluded file was queued: %q", got)
@@ -144,7 +145,7 @@ func TestHandleWatchEventRouting(t *testing.T) {
 	}
 
 	// Vanished file (removed away): stale watch dropped, nothing queued.
-	handleWatchEvent(fsnotify.Event{Name: filepath.Join(dir, "gone.txt"), Op: fsnotify.Remove}, watcher, ch, patterns)
+	handleWatchEvent(fsnotify.Event{Name: filepath.Join(dir, "gone.txt"), Op: fsnotify.Remove}, watcher, ch, patterns, &errW)
 	select {
 	case got := <-ch:
 		t.Errorf("vanished file was queued: %q", got)
@@ -152,7 +153,7 @@ func TestHandleWatchEventRouting(t *testing.T) {
 	}
 
 	// Chmod-only op: ignored.
-	handleWatchEvent(fsnotify.Event{Name: txt, Op: fsnotify.Chmod}, watcher, ch, patterns)
+	handleWatchEvent(fsnotify.Event{Name: txt, Op: fsnotify.Chmod}, watcher, ch, patterns, &errW)
 	select {
 	case got := <-ch:
 		t.Errorf("chmod-only event was queued: %q", got)
@@ -164,21 +165,15 @@ func TestHandleWatchEventRouting(t *testing.T) {
 	if err := os.Mkdir(sub, 0755); err != nil {
 		t.Fatal(err)
 	}
-	stderr := captureStderr(t, func() {
-		handleWatchEvent(fsnotify.Event{Name: sub, Op: fsnotify.Create}, watcher, ch, patterns)
-	})
-	if strings.Contains(stderr, "Error watching new directory") {
-		t.Errorf("unexpected watch error: %s", stderr)
+	handleWatchEvent(fsnotify.Event{Name: sub, Op: fsnotify.Create}, watcher, ch, patterns, &errW)
+	if strings.Contains(errW.String(), "Error watching new directory") {
+		t.Errorf("unexpected watch error: %s", errW.String())
 	}
 }
 
 func TestDebounceAndProcessFlushesBatch(t *testing.T) {
-	dir := t.TempDir()
-	typoFile := filepath.Join(dir, "typo.txt")
-	if err := os.WriteFile(typoFile, []byte("hello wrld\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	cd := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
+	typoFile := writeTempFile(t, "typo.txt", "hello wrld\n")
+	cd := tinyDict("hello", "world")
 
 	// debounceAndProcess writes through the injected writer, so the test can
 	// capture batch output without swapping the os.Stdout global (which would
@@ -304,7 +299,7 @@ func TestGitDiffFilesErrors(t *testing.T) {
 
 func TestRunGitDiffCheckerScansChangedFiles(t *testing.T) {
 	repo := initGitRepo(t)
-	cd := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
+	cd := tinyDict("hello", "world")
 
 	// gitDiffFiles shells out to git in the process working directory, so the
 	// fixture repo must be the cwd and root paths are relative to it.

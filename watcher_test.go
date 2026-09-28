@@ -44,17 +44,10 @@ func captureStdout(t *testing.T, fn func()) string {
 // TestProcessBatchReportsTypos verifies a file with a typo prints the word and
 // a suggestion, while a clean file prints "no typos".
 func TestProcessBatchReportsTypos(t *testing.T) {
-	dir := t.TempDir()
-	typoFile := filepath.Join(dir, "typo.txt")
-	cleanFile := filepath.Join(dir, "clean.txt")
-	if err := os.WriteFile(typoFile, []byte("hello wrld\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := os.WriteFile(cleanFile, []byte("hello world\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	typoFile := writeTempFile(t, "typo.txt", "hello wrld\n")
+	cleanFile := writeTempFile(t, "clean.txt", "hello world\n")
 
-	cd := NewConcurrentDictionary(map[string]struct{}{"hello": {}, "world": {}})
+	cd := tinyDict("hello", "world")
 
 	out := captureStdout(t, func() {
 		processBatch(map[string]struct{}{typoFile: {}}, cd, os.Stdout)
@@ -77,12 +70,8 @@ func TestProcessBatchReportsTypos(t *testing.T) {
 // TestProcessBatchTypoNoSuggestion verifies a typo with no near dictionary word
 // is reported without a "Did you mean" prompt.
 func TestProcessBatchTypoNoSuggestion(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "doc.txt")
-	if err := os.WriteFile(path, []byte("zzzzzzzz\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cd := NewConcurrentDictionary(map[string]struct{}{"completely": {}, "different": {}})
+	path := writeTempFile(t, "doc.txt", "zzzzzzzz\n")
+	cd := tinyDict("completely", "different")
 
 	out := captureStdout(t, func() {
 		processBatch(map[string]struct{}{path: {}}, cd, os.Stdout)
@@ -97,7 +86,7 @@ func TestProcessBatchTypoNoSuggestion(t *testing.T) {
 
 // TestProcessBatchEmptySet verifies processing an empty file set produces no output.
 func TestProcessBatchEmptySet(t *testing.T) {
-	cd := NewConcurrentDictionary(map[string]struct{}{"hello": {}})
+	cd := tinyDict("hello")
 	out := captureStdout(t, func() {
 		processBatch(map[string]struct{}{}, cd, os.Stdout)
 	})
