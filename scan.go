@@ -19,6 +19,12 @@ type MisspelledWord struct {
 	Suggestions []string
 }
 
+// SuggestionString joins suggestions for human-readable output (text, SARIF
+// message, watcher lines). Empty means the typo has no known correction.
+func (m MisspelledWord) SuggestionString() string {
+	return strings.Join(m.Suggestions, ", ")
+}
+
 type CheckResults = map[string][]MisspelledWord
 
 type CheckResult struct {

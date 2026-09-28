@@ -197,50 +197,31 @@ func loadConfig(args []string) (*Config, []string, *pflag.FlagSet, error) {
 	}
 
 	// Only override when the flag was explicitly set on the command line.
-	if fs.Lookup("exclude").Changed {
-		cfg.Exclude = *excludeFlag
+	// Table-driven so adding a flag means adding one row, not one block.
+	overrides := []struct {
+		name  string
+		apply func()
+	}{
+		{"exclude", func() { cfg.Exclude = *excludeFlag }},
+		{"dict", func() { cfg.Dictionary = *dictFlag }},
+		{"personal-dict", func() { cfg.PersonalDictionary = *personalDictFlag }},
+		{"output", func() { cfg.Output = *outputFlag }},
+		{"format", func() { cfg.Format = OutputFormat(*formatFlag) }},
+		{"verbose", func() { cfg.Verbose = *verboseFlag }},
+		{"watch", func() { cfg.Watch = *watchFlag }},
+		{"fix", func() { cfg.Fix = *fixFlag }},
+		{"dry-run", func() { cfg.DryRun = *dryRunFlag }},
+		{"version", func() { cfg.Version = *versionFlag }},
+		{"quiet", func() { cfg.Quiet = *quietFlag }},
+		{"ignore-word", func() { cfg.IgnoreWords = *ignoreWordFlag }},
+		{"min-word-length", func() { cfg.MinWordLength = *minWordLengthFlag }},
+		{"git-diff", func() { cfg.GitDiff = *gitDiffFlag }},
+		{"only-changed-lines", func() { cfg.OnlyChangedLines = *onlyChangedLinesFlag }},
 	}
-	if fs.Lookup("dict").Changed {
-		cfg.Dictionary = *dictFlag
-	}
-	if fs.Lookup("personal-dict").Changed {
-		cfg.PersonalDictionary = *personalDictFlag
-	}
-	if fs.Lookup("output").Changed {
-		cfg.Output = *outputFlag
-	}
-	if fs.Lookup("format").Changed {
-		cfg.Format = OutputFormat(*formatFlag)
-	}
-	if fs.Lookup("verbose").Changed {
-		cfg.Verbose = *verboseFlag
-	}
-	if fs.Lookup("watch").Changed {
-		cfg.Watch = *watchFlag
-	}
-	if fs.Lookup("fix").Changed {
-		cfg.Fix = *fixFlag
-	}
-	if fs.Lookup("dry-run").Changed {
-		cfg.DryRun = *dryRunFlag
-	}
-	if fs.Lookup("version").Changed {
-		cfg.Version = *versionFlag
-	}
-	if fs.Lookup("quiet").Changed {
-		cfg.Quiet = *quietFlag
-	}
-	if fs.Lookup("ignore-word").Changed {
-		cfg.IgnoreWords = *ignoreWordFlag
-	}
-	if fs.Lookup("min-word-length").Changed {
-		cfg.MinWordLength = *minWordLengthFlag
-	}
-	if fs.Lookup("git-diff").Changed {
-		cfg.GitDiff = *gitDiffFlag
-	}
-	if fs.Lookup("only-changed-lines").Changed {
-		cfg.OnlyChangedLines = *onlyChangedLinesFlag
+	for _, o := range overrides {
+		if fs.Lookup(o.name).Changed {
+			o.apply()
+		}
 	}
 
 	// Validate the configuration

@@ -187,3 +187,27 @@ func classifyFile(path string, patterns []string) (fileGate, error) {
 	}
 	return fileOK, nil
 }
+
+// logGate reports a classifyFile outcome to w and whether scanning should
+// proceed. Error lines always print; skip lines print only when verbose.
+// Wording matches the historical directory-walk messages so --verbose output
+// stays identical across scan modes.
+func logGate(w io.Writer, gate fileGate, path string, gateErr error, verbose bool) bool {
+	switch gate {
+	case fileOK:
+		return true
+	case fileExcludeErr:
+		fmt.Fprintf(w, "Error checking exclude pattern on %q: %v\n", path, gateErr)
+	case fileBinaryErr:
+		fmt.Fprintf(w, "Error checking if file is binary %q: %v\n", path, gateErr)
+	case fileExcluded:
+		if verbose {
+			fmt.Fprintf(w, "Skipping excluded file: %s\n", path)
+		}
+	case fileBinary:
+		if verbose {
+			fmt.Fprintf(w, "Skipping binary file: %s\n", path)
+		}
+	}
+	return false
+}

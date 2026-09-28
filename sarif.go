@@ -1,10 +1,8 @@
 package main
 
 import (
-	"encoding/json"
 	"io"
 	"strconv"
-	"strings"
 )
 
 const sarifTypoRuleID = "spellcheck/typo"
@@ -83,7 +81,7 @@ func generateSARIFReport(writer io.Writer, results CheckResults) error {
 	sarifResults := []sarifResult{}
 	for _, p := range paths {
 		for _, m := range results[p] {
-			msg := typoMessage(m.Word, strings.Join(m.Suggestions, ", "))
+			msg := typoMessage(m.Word, m.SuggestionString())
 			sarifResults = append(sarifResults, sarifResult{
 				RuleID:  sarifTypoRuleID,
 				Level:   "warning",
@@ -129,8 +127,6 @@ func generateSARIFReport(writer io.Writer, results CheckResults) error {
 		}},
 	}
 
-	enc := json.NewEncoder(writer)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
+	enc := newJSONEncoder(writer)
 	return enc.Encode(report)
 }

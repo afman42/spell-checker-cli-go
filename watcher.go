@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -50,7 +49,7 @@ func runWatcherWithContext(ctx context.Context, rootPath string, dictionary map[
 			if !ok {
 				return nil
 			}
-			handleWatchEvent(event, watcher, eventCh, excludePatterns)
+			handleWatchEvent(event, watcher, eventCh, excludePatterns, errW)
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return nil
@@ -79,7 +78,7 @@ func addDirsToWatcher(watcher *fsnotify.Watcher, rootPath string, excludePattern
 		return watcher.Add(path)
 	})
 }
-func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh chan<- string, excludePatterns []string) {
+func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh chan<- string, excludePatterns []string, errW io.Writer) {
 	// Editors save in many ways: direct writes, or write-temp-then-rename
 	// (atomic save). Cover Write, Create, Rename, and Remove so saves and
 	// deletions are handled and stale watches don't leak.
@@ -101,20 +100,22 @@ func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh c
 	if info.IsDir() {
 		excluded, err := shouldExclude(event.Name, patterns)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", event.Name, err)
+			fmt.Fprintf(errW, "Error checking exclude pattern on %q: %v\n", event.Name, err)
 			return
 		}
 		if !excluded {
 			if err := addDirsToWatcher(watcher, event.Name, patterns); err != nil {
-				fmt.Fprintf(os.Stderr, "Error watching new directory %s: %v\n", event.Name, err)
+				fmt.Fprintf(errW, "Error watching new directory %s: %v\n", event.Name, err)
 			}
 		}
 		return
 	}
 
 	if gate, err := classifyFile(event.Name, patterns); gate != fileOK {
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error checking %q: %v\n", event.Name, err)
+		// Error gates carry their message in err; excluded/binary files
+		// only log when verbose, matching the directory-walk policy.
+		if !logGate(errW, gate, event.Name, err, false) && err != nil {
+			fmt.Fprintf(errW, "Error checking %q: %v\n", event.Name, err)
 		}
 		return
 	}
@@ -127,7 +128,7 @@ func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh c
 	select {
 	case eventCh <- event.Name:
 	default:
-		fmt.Fprintf(os.Stderr, "Watch: event queue full, dropping %s\n", event.Name)
+		fmt.Fprintf(errW, "Watch: event queue full, dropping %s\n", event.Name)
 	}
 }
 
@@ -225,7 +226,7 @@ func processBatch(files map[string]struct{}, dict *ConcurrentDictionary, out io.
 		}
 		fmt.Fprintf(out, "[%s] %s\n", timestamp, path)
 		for _, m := range typos {
-			fmt.Fprintf(out, "  - %s\n", formatTypoLine(m, m.Word, strings.Join(m.Suggestions, ", ")))
+			fmt.Fprintf(out, "  - %s\n", formatTypoLine(m, m.Word, m.SuggestionString()))
 		}
 	}
 }

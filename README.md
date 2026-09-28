@@ -438,7 +438,7 @@ git commit --no-verify
 ├── main.go              Entry point, config, output routing, run-mode dispatch
 ├── scan.go              Scan core: line reader, tokenizer, checkFile, checkStdin
 ├── runners.go           Scan modes: directory walk, git-diff, hunk-scoped, worker pool, progress bar
-├── filegate.go          File filtering: exclude globs, binary detection, word tokenizer regex
+├── filegate.go          File filtering: exclude globs, binary detection, word tokenizer regex, gate logging
 ├── dictionary.go        Dictionary loading (zstd-compressed embedded dict) + ConcurrentDictionary
 ├── suggestions.go       BK-tree + Levenshtein distance for suggestions
 ├── tree_cache.go        On-disk persistence of the built suggestion tree
@@ -446,7 +446,7 @@ git commit --no-verify
 ├── watcher.go           Watch mode (fsnotify)
 ├── reporter.go          Text, HTML, and JSON output generation
 ├── gen_dict.go          Dictionary generator (//go:build ignore)
-├── diff.go              Git-diff file list (--git-diff)
+├── diff.go              Git-diff file list + hunk parsing (--git-diff)
 ├── markdown.go          Markdown noise stripping (fences, inline code, URLs)
 ├── sarif.go             SARIF v2.1.0 report generation
 ├── spellignore.go       .spellignore file loader
@@ -469,6 +469,7 @@ git commit --no-verify
 ├── dictionary_bench_test.go Decompression speed benchmarks (zstd)
 ├── optimizer_bench_test.go  Suggestion-path benchmarks (BK search, memo cache)
 ├── coverage_extra_test.go   Config/report/watcher/git-diff integration tests
+├── testhelpers_test.go       Shared test helpers (temp files, tiny dicts, gate/suggestion/git tests)
 ├── .githooks/pre-commit     Git pre-commit hook
 ├── test/                    Integration test fixtures
 └── .github/workflows/       CI pipeline

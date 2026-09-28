@@ -38,23 +38,34 @@ func gitDiffFiles(ref string) ([]string, error) {
 	return gitDiffFilesWithContext(context.Background(), ref)
 }
 
+// runGit executes git with args, capturing stdout. Stderr is folded into the
+// returned error so callers surface git's own message (bad ref, not a repo).
+func runGit(ctx context.Context, op string, args ...string) (string, error) {
+	var out, errBuf bytes.Buffer
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%s failed: %s: %w", op, strings.TrimSpace(errBuf.String()), err)
+	}
+	return out.String(), nil
+}
+
 func gitDiffFilesWithContext(ctx context.Context, ref string) ([]string, error) {
 	if err := validateGitRef(ref); err != nil {
 		return nil, err
 	}
-	var cmd *exec.Cmd
+	var args []string
 	if ref == "staged" {
-		cmd = exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+		args = []string{"diff", "--cached", "--name-only", "--diff-filter=ACMR"}
 	} else {
-		cmd = exec.CommandContext(ctx, "git", "diff", "--name-only", ref, "--diff-filter=ACMR")
+		args = []string{"diff", "--name-only", ref, "--diff-filter=ACMR"}
 	}
-	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git diff failed: %s: %w", strings.TrimSpace(errBuf.String()), err)
+	out, err := runGit(ctx, "git diff", args...)
+	if err != nil {
+		return nil, err
 	}
-	trimmed := strings.TrimSpace(out.String())
+	trimmed := strings.TrimSpace(out)
 	if trimmed == "" {
 		return []string{}, nil
 	}
@@ -118,17 +129,11 @@ func gitDiffHunks(ctx context.Context, ref string) (string, error) {
 	if err := validateGitRef(ref); err != nil {
 		return "", err
 	}
-	var cmd *exec.Cmd
+	var args []string
 	if ref == "staged" {
-		cmd = exec.CommandContext(ctx, "git", "diff", "--cached", "--unified=0")
+		args = []string{"diff", "--cached", "--unified=0"}
 	} else {
-		cmd = exec.CommandContext(ctx, "git", "diff", "--unified=0", ref)
+		args = []string{"diff", "--unified=0", ref}
 	}
-	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git diff hunks failed: %s: %w", strings.TrimSpace(errBuf.String()), err)
-	}
-	return out.String(), nil
+	return runGit(ctx, "git diff hunks", args...)
 }

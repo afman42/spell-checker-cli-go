@@ -161,24 +161,7 @@ func filterDiffFiles(ctx context.Context, ref, rootPath string, excludePatterns 
 		default:
 		}
 		gate, err := classifyFile(p, patterns)
-		switch gate {
-		case fileExcludeErr:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", p, err)
-			}
-		case fileExcluded:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Skipping excluded file: %s\n", p)
-			}
-		case fileBinaryErr:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", p, err)
-			}
-		case fileBinary:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", p)
-			}
-		default:
+		if logGate(os.Stderr, gate, p, err, verbose) {
 			files = append(files, p)
 		}
 	}
@@ -260,20 +243,7 @@ func collectFilesWithContext(ctx context.Context, rootPath string, excludePatter
 		}
 
 		gate, err := classifyFile(path, patterns)
-		switch gate {
-		case fileExcludeErr:
-			fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", path, err)
-		case fileExcluded:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Skipping excluded file: %s\n", path)
-			}
-		case fileBinaryErr:
-			fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", path, err)
-		case fileBinary:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", path)
-			}
-		default:
+		if logGate(os.Stderr, gate, path, err, verbose) {
 			files = append(files, path)
 		}
 		return nil

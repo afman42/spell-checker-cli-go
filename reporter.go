@@ -355,6 +355,15 @@ func writeTypoRow(w io.Writer, m MisspelledWord) {
 		m.LineNumber, m.Column, html.EscapeString(m.Word), html.EscapeString(strings.Join(m.Suggestions, ", ")))
 }
 
+// newJSONEncoder returns the shared machine-report encoder: indented,
+// HTML-unescaped (so <>& stay literal for SARIF consumers and JSON readers).
+func newJSONEncoder(writer io.Writer) *json.Encoder {
+	enc := json.NewEncoder(writer)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc
+}
+
 // --- Text report with optional terminal colors ---
 
 // typoMessage renders the shared "X appears to be a typo" phrase with an
@@ -422,7 +431,7 @@ func generateTextReport(writer io.Writer, results CheckResults) error {
 		fmt.Fprintf(w, "\n--- In file %s ---\n", file)
 		for _, m := range words {
 			word := m.Word
-			suggestionsStr := strings.Join(m.Suggestions, ", ")
+			suggestionsStr := m.SuggestionString()
 			if useColors {
 				word = ansiBold + ansiRed + word + ansiReset
 				if len(m.Suggestions) > 0 {
@@ -491,8 +500,5 @@ func generateJSONReport(writer io.Writer, results CheckResults) error {
 		report.Files = append(report.Files, jf)
 	}
 
-	enc := json.NewEncoder(writer)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	return enc.Encode(report)
+	return newJSONEncoder(writer).Encode(report)
 }
