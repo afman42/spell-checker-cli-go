@@ -13,9 +13,9 @@ typos with ranked "did you mean?" suggestions.
 - **Unicode-aware** — handles accents (café), contractions (don't, it's),
   hyphenated words (state-of-the-art).
 - **Multiple outputs** — plain text with colors, responsive dark-mode HTML, machine-readable JSON, or SARIF v2.1.0 (for GitHub Code Scanning).
-- **Auto-fix** — `--fix` rewrites each typo to its top suggestion in place (with `--dry-run`).
+- **Auto-fix** — `--fix` rewrites each typo to its top suggestion in place (with `--dry-run`); per-file failures are collected and all reported together instead of aborting on the first bad file.
 - **Watch mode** — `fsnotify` re-checks files automatically as you save.
-- **Fast startup** — the suggestion index is built once, then persisted on disk
+- **Fast startup** — the suggestion index is built once per run (warmed before the worker pool, so cores never duplicate the build), then persisted on disk
   and reused across runs (invalidation is automatic on dictionary change).
 - **Prose-focused** — identifier fragments (`Mi03x_er`), binary files, and
   dependency trees (`.git`, `node_modules`, …) are skipped by default. Markdown
@@ -85,6 +85,7 @@ go build -o spellchecker .
 | `--git-diff` | Scan only files changed vs a git ref (`staged` for the index) | `--git-diff main` |
 | `--only-changed-lines` | With `--git-diff`: only report typos on added lines (hunk-scoped) | `--git-diff main --only-changed-lines` |
 | `--config` | Explicit path to a config file (overrides the auto search) | `--config ./ci.yaml` |
+| `-h, --help` | Print usage with the full flag list and exit 0 | `--help` |
 
 Settings precedence: **flags > config file > defaults**. A flag only overrides
 the config file when explicitly passed on the command line, so a value set in
@@ -477,7 +478,7 @@ git commit --no-verify
 
 | Component | What it does |
 |-----------|-------------|
-| **Worker pool** | Files are checked in parallel, one goroutine per CPU core; multiple file errors are aggregated and reported together |
+| **Worker pool** | Files are checked in parallel, one goroutine per CPU core; multiple file errors are aggregated and reported together; the suggestion tree is warmed once before spawn so workers never duplicate the cold-start build |
 | **Word tokenizer** | Unicode-aware regex (`\p{L}+`) for accents, contractions, hyphens; lines up to 1 MiB; identifier fragments next to digits/underscores are skipped; over-long lines are skipped without failing the file |
 | **Dictionary** | Zstd-compressed word list embedded at compile time; O(1) hash-set lookup |
 | **Suggestions** | BK-tree for O(log n) fuzzy search; Levenshtein edit distance ≤ 2; ranking is transposition- and prefix-aware |
@@ -485,7 +486,7 @@ git commit --no-verify
 | **Binary detection** | Extensions (`.pdf`, images, archives, fonts, …) plus NUL/control-byte sniffing in the first 512 bytes are skipped |
 | **Default excludes** | `.git`, `node_modules`, `vendor`, venvs, and tool caches are always skipped; `--exclude` patterns merge on top |
 | **Watch mode** | `fsnotify` watches directories, debounces rapid save events (200 ms) |
-| **Atomic writes** | `--fix` writes a temp file, `fsync`s it, renames over the target, then syncs the directory — crash-safe and permission-preserving |
+| **Atomic writes** | `--fix` writes a temp file, `fsync`s it, renames over the target, then syncs the directory — crash-safe and permission-preserving; one bad file no longer aborts the rest (errors collected with `errors.Join`) |
 | **Hunk filter** | `--only-changed-lines` parses `git diff --unified=0` hunks and reports only added-line typos |
 | **Graceful shutdown** | `signal.NotifyContext` cancels the scan on `SIGINT`/`SIGTERM`; partial results are still reported, git uses `exec.CommandContext` |
 

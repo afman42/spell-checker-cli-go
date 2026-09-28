@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -57,50 +59,50 @@ func shouldExclude(filePath string, patterns []string) (bool, error) {
 		// "third_party/**" or "src/generated/*" work as documented. Patterns
 		// without "/" keep the basename match (backward compatible).
 		if strings.Contains(pattern, "/") {
-			// Handle "**" as a recursive prefix match, since filepath.Match
-			// treats * as single-component only. "third_party/**" should
-			// match any file under third_party/ at any depth.
-			if strings.HasSuffix(pattern, "/**") {
-				prefix := strings.TrimSuffix(pattern, "/**")
-				if relPath == prefix || strings.HasPrefix(relPath, prefix+"/") {
-					return true, nil
-				}
-				cleanRel := strings.TrimPrefix(relPath, "./")
-				if cleanRel == prefix || strings.HasPrefix(cleanRel, prefix+"/") {
-					return true, nil
-				}
-				continue
-			}
-			matched, err := filepath.Match(pattern, relPath)
+			matched, err := matchSlashPattern(relPath, pattern)
 			if err != nil {
-				return false, err
+				return false, fmt.Errorf("invalid exclude pattern %q: %w", pattern, err)
 			}
 			if matched {
 				return true, nil
-			}
-			// Also try matching the pattern against the path after
-			// stripping any leading "./" from the file path.
-			cleanRel := strings.TrimPrefix(relPath, "./")
-			if cleanRel != relPath {
-				matched, err = filepath.Match(pattern, cleanRel)
-				if err != nil {
-					return false, err
-				}
-				if matched {
-					return true, nil
-				}
 			}
 			continue
 		}
 		matched, err := filepath.Match(pattern, fileName)
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("invalid exclude pattern %q: %w", pattern, err)
 		}
 		if matched {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// matchSlashPattern matches a pattern containing "/" against relPath. It
+// handles "**" as a recursive prefix match (filepath.Match treats * as
+// single-component only, so "third_party/**" must match at any depth) and
+// also tries the path with any leading "./" stripped.
+func matchSlashPattern(relPath, pattern string) (bool, error) {
+	if strings.HasSuffix(pattern, "/**") {
+		prefix := strings.TrimSuffix(pattern, "/**")
+		if relPath == prefix || strings.HasPrefix(relPath, prefix+"/") {
+			return true, nil
+		}
+		cleanRel := strings.TrimPrefix(relPath, "./")
+		return cleanRel == prefix || strings.HasPrefix(cleanRel, prefix+"/"), nil
+	}
+	matched, err := filepath.Match(pattern, relPath)
+	if err != nil || matched {
+		return matched, err
+	}
+	// Also try matching the pattern against the path after
+	// stripping any leading "./" from the file path.
+	cleanRel := strings.TrimPrefix(relPath, "./")
+	if cleanRel == relPath {
+		return false, nil
+	}
+	return filepath.Match(pattern, cleanRel)
 }
 
 // binaryExtensions are file types that are almost never written as prose and
@@ -117,21 +119,20 @@ var binaryExtensions = map[string]struct{}{
 }
 
 func isLikelyBinary(filePath string) (bool, error) {
-	if ext := strings.ToLower(filepath.Ext(filePath)); ext != "" {
-		if _, ok := binaryExtensions[ext]; ok {
-			return true, nil
-		}
+	// A missing extension misses the map and falls through to the sniff.
+	if _, ok := binaryExtensions[strings.ToLower(filepath.Ext(filePath))]; ok {
+		return true, nil
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("could not open %q: %w", filePath, err)
 	}
 	defer file.Close()
 	buffer := make([]byte, 512)
 	n, err := file.Read(buffer)
-	if err != nil && err != io.EOF {
-		return false, err
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("could not read %q: %w", filePath, err)
 	}
 	buffer = buffer[:n]
 	// NUL is the classic text/binary discriminator.

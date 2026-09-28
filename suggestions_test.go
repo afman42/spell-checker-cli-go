@@ -213,8 +213,8 @@ func TestSuggestUsesBKTreeForLargeDict(t *testing.T) {
 // TestBKTreeSearchEmptyTree ensures searching an empty tree is safe.
 func TestBKTreeSearchEmptyTree(t *testing.T) {
 	tree := &BKTree{}
-	if got := tree.Search("anything", 2); got != nil {
-		t.Errorf("expected nil from empty tree, got %v", got)
+	if got := tree.Search("anything", 2); len(got) != 0 {
+		t.Errorf("expected empty from empty tree, got %v", got)
 	}
 }
 

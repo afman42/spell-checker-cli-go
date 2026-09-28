@@ -66,21 +66,35 @@ type Config struct {
 	OnlyChangedLines bool   `yaml:"only-changed-lines"`
 }
 
-// Validate ensures the configuration is valid
+// Validate ensures the configuration is valid. Stable validation failures
+// are sentinels; match them with errors.Is. Static cases use errors.New
+// (not fmt.Errorf) — no formatting verbs needed.
+var (
+	ErrInvalidFormat                 = errors.New("invalid format")
+	ErrDryRunWithoutFix              = errors.New("--dry-run requires --fix")
+	ErrInvalidMinWordLength          = errors.New("min-word-length must be >= 0")
+	ErrOnlyChangedLinesWithoutDiff   = errors.New("--only-changed-lines requires --git-diff")
+	ErrTooManyPositionalPaths        = errors.New("expected a single file or directory")
+	ErrImplausibleTreeCacheStructure = errors.New("cache rejected: implausible tree structure")
+	// errHelpRequested is returned when pflag reports -h/--help; callers
+	// print usage on stdout and exit 0 instead of treating it as a failure.
+	errHelpRequested = errors.New("help requested")
+)
+
 func (c *Config) Validate() error {
 	switch c.Format {
 	case "", FormatText, FormatHTML, FormatJSON, FormatSarif:
 	default:
-		return fmt.Errorf("invalid format: %s, must be 'txt', 'html', 'json', or 'sarif'", c.Format)
+		return fmt.Errorf("%w: %s, must be 'txt', 'html', 'json', or 'sarif'", ErrInvalidFormat, c.Format)
 	}
 	if c.DryRun && !c.Fix {
-		return fmt.Errorf("--dry-run requires --fix")
+		return ErrDryRunWithoutFix
 	}
 	if c.MinWordLength < 0 {
-		return fmt.Errorf("min-word-length must be >= 0, got %d", c.MinWordLength)
+		return fmt.Errorf("%w, got %d", ErrInvalidMinWordLength, c.MinWordLength)
 	}
 	if c.OnlyChangedLines && c.GitDiff == "" {
-		return fmt.Errorf("--only-changed-lines requires --git-diff")
+		return ErrOnlyChangedLinesWithoutDiff
 	}
 	return nil
 }
@@ -114,11 +128,11 @@ func findConfigFile(dirs []string) string {
 func loadYAMLConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("error reading config file %q: %w", path, err)
+		return nil, fmt.Errorf("reading config file %q: %w", path, err)
 	}
 	cfg := &Config{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("error parsing config file %q: %w", path, err)
+		return nil, fmt.Errorf("parsing config file %q: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -136,8 +150,9 @@ const stdinKey = "<stdin>"
 
 // loadConfig parses flags from args, merges them over any spellchecker.yaml,
 // validates the result, and returns the config plus leftover positional args.
-// Precedence: Flags > Config File > Defaults.
-func loadConfig(args []string) (*Config, []string, error) {
+// Precedence: Flags > Config File > Defaults. The FlagSet is returned so
+// callers can render the full flag list (fs.PrintDefaults) on -h/--help.
+func loadConfig(args []string) (*Config, []string, *pflag.FlagSet, error) {
 	// --- Define Flags using pflag ---
 	fs := pflag.NewFlagSet("spellchecker", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard) // errors are reported by the caller
@@ -158,21 +173,25 @@ func loadConfig(args []string) (*Config, []string, error) {
 	gitDiffFlag := fs.String("git-diff", "", "Optional: scan only files changed relative to a git ref (e.g. 'main'). Use 'staged' for staged changes.")
 	onlyChangedLinesFlag := fs.Bool("only-changed-lines", false, "With --git-diff: only report typos on added lines (parsed from git diff hunks).")
 	if err := fs.Parse(args); err != nil {
-		return nil, nil, err
+		// pflag returns ErrHelp for -h/--help; callers print usage instead
+		// of treating it as a failure.
+		if errors.Is(err, pflag.ErrHelp) {
+			return nil, nil, fs, errHelpRequested
+		}
+		return nil, nil, fs, err
 	}
-
 	// --- Load Config File (YAML) — single load, explicit --config wins ---
 	cfg := &Config{}
 	if fs.Lookup("config").Changed && *configFlag != "" {
 		loaded, err := loadYAMLConfig(*configFlag)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fs, err
 		}
 		cfg = loaded
 	} else if path := findConfigFile(configSearchDirs()); path != "" {
 		loaded, err := loadYAMLConfig(path)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fs, err
 		}
 		cfg = loaded
 	}
@@ -226,14 +245,14 @@ func loadConfig(args []string) (*Config, []string, error) {
 
 	// Validate the configuration
 	if err := cfg.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("configuration validation error: %w", err)
+		return nil, nil, fs, fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	positionals := fs.Args()
 	if len(positionals) > 1 {
-		return nil, nil, fmt.Errorf("expected a single file or directory, got %d paths: %v", len(positionals), positionals)
+		return nil, nil, fs, fmt.Errorf("%w, got %d paths", ErrTooManyPositionalPaths, len(positionals))
 	}
-	return cfg, positionals, nil
+	return cfg, positionals, fs, nil
 }
 
 func main() {
@@ -261,7 +280,7 @@ func writeReport(w io.Writer, results CheckResults, format OutputFormat) error {
 		genErr, kind = generateTextReport(w, results), "text"
 	}
 	if genErr != nil {
-		return fmt.Errorf("error generating %s report: %w", kind, genErr)
+		return fmt.Errorf("generating %s report: %w", kind, genErr)
 	}
 	return nil
 }
@@ -274,12 +293,17 @@ func run(args []string) int {
 
 func runWithContext(ctx context.Context, args []string, outW, errW io.Writer) int {
 	// --- Load Configuration ---
-	cfg, positionals, err := loadConfig(args)
+	cfg, positionals, fs, err := loadConfig(args)
+	if errors.Is(err, errHelpRequested) {
+		fmt.Fprintln(outW, "Usage: spellchecker [flags] <file_or_directory>")
+		fs.SetOutput(outW)
+		fs.PrintDefaults()
+		return exitOK
+	}
 	if err != nil {
 		fmt.Fprintf(errW, "Fatal error loading configuration: %v\n", err)
 		return exitError
 	}
-
 	// Early exit: --version after config load, before heavy dictionary build.
 	if cfg.Version {
 		fmt.Fprintln(outW, versionString)

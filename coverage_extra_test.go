@@ -46,11 +46,11 @@ func TestLoadYAMLConfig(t *testing.T) {
 	if err := os.WriteFile(malformed, []byte("exclude: [unclosed\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadYAMLConfig(malformed); err == nil || !strings.Contains(err.Error(), "error parsing config file") {
+	if _, err := loadYAMLConfig(malformed); err == nil || !strings.Contains(err.Error(), "parsing config file") {
 		t.Errorf("expected parse error, got %v", err)
 	}
 
-	if _, err := loadYAMLConfig(filepath.Join(dir, "missing.yaml")); err == nil || !strings.Contains(err.Error(), "error reading config file") {
+	if _, err := loadYAMLConfig(filepath.Join(dir, "missing.yaml")); err == nil || !strings.Contains(err.Error(), "reading config file") {
 		t.Errorf("expected read error, got %v", err)
 	}
 }
@@ -201,8 +201,8 @@ func TestDebounceAndProcessFlushesBatch(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// ponytail: debounceAndProcess goroutine leaks blocking on <-eventCh after
-	// flush; fine for test process lifetime.
+	// The test process exits with the goroutine blocked on eventCh; see
+	// TestDebounceExitsOnClosedChannel for the close-channel shutdown path.
 	if !strings.Contains(got, "no typos") && !strings.Contains(got, "wrld") {
 		t.Errorf("expected batch result for %s, got:\n%s", typoFile, got)
 	}

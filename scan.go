@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -85,7 +86,7 @@ nextLine:
 		for {
 			frag, err := lr.br.ReadSlice('\n')
 			switch {
-			case err == bufio.ErrBufferFull:
+			case errors.Is(err, bufio.ErrBufferFull):
 				if over {
 					lr.writeSink(frag)
 					continue
@@ -96,7 +97,7 @@ nextLine:
 					lr.writeSink(line)
 					line = nil
 				}
-			case err == io.EOF:
+			case errors.Is(err, io.EOF):
 				if over {
 					lr.writeSink(frag)
 					lr.lineNum++
@@ -139,9 +140,15 @@ nextLine:
 // misspelled and returns the extended slice. Its sole consumer is the
 // streaming scanner scanForTypos, so the tokenize/filter/report loop exists
 // in exactly one place.
-func scanLineForTypos(line string, lineNumber int, dictionary *ConcurrentDictionary, opts scanOptions, misspelled []MisspelledWord) []MisspelledWord {
-	if opts.ChangedLines != nil {
-		if _, ok := opts.ChangedLines[lineNumber]; !ok {
+func scanLineForTypos(
+	line string,
+	lineNumber int,
+	dictionary *ConcurrentDictionary,
+	opts scanOptions,
+	misspelled []MisspelledWord,
+) []MisspelledWord {
+	if changed := opts.ChangedLines; changed != nil {
+		if _, ok := changed[lineNumber]; !ok {
 			return misspelled
 		}
 	}
@@ -169,11 +176,11 @@ func scanLineForTypos(line string, lineNumber int, dictionary *ConcurrentDiction
 }
 
 func scanForTypos(r io.Reader, dictionary *ConcurrentDictionary, opts scanOptions) ([]MisspelledWord, error) {
-	var misspelledWords []MisspelledWord
+	misspelledWords := []MisspelledWord{}
 	lr := newLineReader(r, maxLineLen)
 	for {
 		line, lineNumber, err := lr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -222,10 +229,10 @@ func checkFileWithOptions(filePath string, dictionary *ConcurrentDictionary, opt
 	if isMarkdownExt(filePath) {
 		lr := newLineReader(file, maxLineLen)
 		var st mdState
-		var misspelled []MisspelledWord
+		misspelled := []MisspelledWord{}
 		for {
 			line, lineNumber, err := lr.Next()
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {
@@ -255,7 +262,7 @@ func isMarkdownExt(filePath string) bool {
 func checkStdin(r io.Reader, dictionary *ConcurrentDictionary, opts scanOptions) ([]MisspelledWord, error) {
 	misspelledWords, err := scanForTypos(r, dictionary, opts)
 	if err != nil {
-		return nil, fmt.Errorf("error reading stdin: %w", err)
+		return nil, fmt.Errorf("reading stdin: %w", err)
 	}
 	return misspelledWords, nil
 }

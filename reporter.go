@@ -3,12 +3,14 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,7 +55,7 @@ func summarizeStats(results CheckResults) (totalFiles, totalTypos, totalSuggesti
 			totalSuggestions += len(w.Suggestions)
 		}
 	}
-	return
+	return totalFiles, totalTypos, totalSuggestions
 }
 
 // fileEntry pairs a source file path with its typos and deduplicated report filename.
@@ -68,7 +70,7 @@ type fileEntry struct {
 // generateMultiFileHTMLReport creates a directory with an index.html and separate reports.
 func generateMultiFileHTMLReport(outputDir string, results CheckResults) error {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("could not create output directory %s: %w", outputDir, err)
+		return fmt.Errorf("could not create output directory %q: %w", outputDir, err)
 	}
 
 	// Build entries with safe relative report paths.
@@ -93,7 +95,7 @@ func generateMultiFileHTMLReport(outputDir string, results CheckResults) error {
 		if n, ok := usedNames[base]; ok {
 			ext := filepath.Ext(base)
 			origBase := base
-			base = strings.TrimSuffix(base, ext) + fmt.Sprintf("_%d", n) + ext
+			base = strings.TrimSuffix(base, ext) + "_" + strconv.Itoa(n) + ext
 			usedNames[origBase] = n + 1
 		} else {
 			usedNames[base] = 1
@@ -102,12 +104,16 @@ func generateMultiFileHTMLReport(outputDir string, results CheckResults) error {
 	}
 
 	if err := generateIndexFile(outputDir, entries, results); err != nil {
-		return err
+		return fmt.Errorf("could not write index file in %q: %w", outputDir, err)
 	}
+	var errs []error
 	for _, entry := range entries {
 		if err := generateSingleReportFile(outputDir, entry.filename, entry.path, entry.words, entries); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("could not write report for %q: %w", entry.path, err))
 		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	fmt.Printf("Successfully generated %d report files in %s\n", len(entries)+1, outputDir)
 	return nil
@@ -170,16 +176,17 @@ func generateIndexFile(outputDir string, entries []fileEntry, results CheckResul
 		fmt.Fprint(w, `<ul class="file-list">`)
 		for _, entry := range entries {
 			count := len(entry.words)
-			var label, clsLabel string
-			if count > 1 {
-				label = fmt.Sprintf("%d typos", count)
-				clsLabel = "error"
-			} else if count == 1 {
+			label := "clean"
+			clsLabel := "clean"
+			switch count {
+			case 1:
 				label = "1 typo"
 				clsLabel = "error"
-			} else {
-				label = "clean"
-				clsLabel = "clean"
+			default:
+				if count > 1 {
+					label = strconv.Itoa(count) + " typos"
+					clsLabel = "error"
+				}
 			}
 			fmt.Fprintf(w, `<li class="file-item"><a href="%s">%s</a> <span class="typo-count %s">%s</span></li>`,
 				html.EscapeString(entry.filename), html.EscapeString(entry.path), clsLabel, label)
@@ -195,11 +202,11 @@ func generateIndexFile(outputDir string, entries []fileEntry, results CheckResul
 func generateSingleReportFile(outputDir, filename, filePath string, words []MisspelledWord, allEntries []fileEntry) error {
 	reportPath := filepath.Join(outputDir, filename)
 	if err := os.MkdirAll(filepath.Dir(reportPath), 0755); err != nil {
-		return fmt.Errorf("could not create directories for %s: %w", filePath, err)
+		return fmt.Errorf("could not create directories for %q: %w", filePath, err)
 	}
 	file, err := os.Create(reportPath)
 	if err != nil {
-		return fmt.Errorf("could not create report file for %s: %w", filePath, err)
+		return fmt.Errorf("could not create report file for %q: %w", filePath, err)
 	}
 	defer file.Close()
 	w := &errWriter{w: file}
@@ -221,11 +228,19 @@ func generateSingleReportFile(outputDir, filename, filePath string, words []Miss
 			if e.path == filePath {
 				if i > 0 {
 					rel := relLink(filename, allEntries[i-1].filename)
-					prevLink = fmt.Sprintf(`<a class="nav-link" href="%s">← %s</a>`, html.EscapeString(rel), html.EscapeString(filepath.Base(allEntries[i-1].path)))
+					prevLink = fmt.Sprintf(
+						`<a class="nav-link" href="%s">← %s</a>`,
+						html.EscapeString(rel),
+						html.EscapeString(filepath.Base(allEntries[i-1].path)),
+					)
 				}
 				if i < len(allEntries)-1 {
 					rel := relLink(filename, allEntries[i+1].filename)
-					nextLink = fmt.Sprintf(`<a class="nav-link" href="%s" style="margin-left:auto">%s →</a>`, html.EscapeString(rel), html.EscapeString(filepath.Base(allEntries[i+1].path)))
+					nextLink = fmt.Sprintf(
+						`<a class="nav-link" href="%s" style="margin-left:auto">%s →</a>`,
+						html.EscapeString(rel),
+						html.EscapeString(filepath.Base(allEntries[i+1].path)),
+					)
 				}
 				break
 			}
@@ -347,9 +362,11 @@ func writeTypoRow(w io.Writer, m MisspelledWord) {
 // messages in sync. suggestions must be pre-joined (or colored); empty means
 // no suffix.
 func typoMessage(word, suggestions string) string {
+	// Keep "%s" (not %q): callers pass pre-colored words with ANSI codes
+	// that %q would escape into literals.
 	msg := fmt.Sprintf("\"%s\" appears to be a typo.", word)
 	if suggestions != "" {
-		msg += fmt.Sprintf(" Did you mean: %s?", suggestions)
+		msg += " Did you mean: " + suggestions + "?"
 	}
 	return msg
 }

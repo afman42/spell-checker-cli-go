@@ -31,7 +31,7 @@ func main() {
 func run() error {
 	in, err := os.Open("dictionary.csv")
 	if err != nil {
-		return err
+		return fmt.Errorf("opening dictionary.csv: %w", err)
 	}
 	defer in.Close()
 
@@ -70,24 +70,23 @@ func run() error {
 
 	out, err := os.Create("dictionary.txt.zst")
 	if err != nil {
-		return err
+		return fmt.Errorf("creating dictionary.txt.zst: %w", err)
 	}
 	defer out.Close()
-
 	zw, err := zstd.NewWriter(out, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
 	if err != nil {
 		return fmt.Errorf("creating zstd writer: %w", err)
 	}
-	defer zw.Close()
+	// No deferred backup close: the explicit checked Close below flushes.
 
 	for _, w := range words {
 		if _, err := io.WriteString(zw, w+"\n"); err != nil {
-			return err
+			return fmt.Errorf("writing word %q: %w", w, err)
 		}
 	}
 
 	if err := zw.Close(); err != nil {
-		return err
+		return fmt.Errorf("closing zstd writer: %w", err)
 	}
 
 	fmt.Printf("wrote dictionary.txt.zst: %d unique words\n", len(words))

@@ -22,15 +22,27 @@ func runConcurrentCheckerWithDict(rootPath string, concurrentDict *ConcurrentDic
 func runConcurrentCheckerWithDictAndContext(ctx context.Context, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool, opts scanOptions) (CheckResults, error) {
 	allFiles, err := collectFilesWithContext(ctx, rootPath, excludePatterns, verbose)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("collecting files in %q: %w", rootPath, err)
 	}
 	return runCheckerOnFilesWithContext(ctx, allFiles, concurrentDict, verbose, opts)
 }
 
 func runCheckerOnFilesWithContext(ctx context.Context, files []string, concurrentDict *ConcurrentDictionary, verbose bool, opts scanOptions) (CheckResults, error) {
+	_ = verbose // pool progress is terminal-gated, not verbose-gated
+	return runPool(ctx, files, concurrentDict, opts, nil)
+}
+
+// runPool fans files out to NumCPU workers and drains per-file results,
+// aggregating every worker failure with errors.Join while keeping partial
+// results. changedLines is nil for full-file scans.
+func runPool(ctx context.Context, files []string, concurrentDict *ConcurrentDictionary, opts scanOptions, changedLines ChangedLines) (CheckResults, error) {
 	if len(files) == 0 {
 		return make(CheckResults), nil
 	}
+
+	// Build the suggestion tree once here so N workers do not race the
+	// cold-start build (first Suggest wins, rest duplicate the work).
+	concurrentDict.Warmup()
 
 	totalFiles := len(files)
 	numWorkers := runtime.NumCPU()
@@ -44,7 +56,7 @@ func runCheckerOnFilesWithContext(ctx context.Context, files []string, concurren
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
-		go workerWithContext(ctx, &wg, jobs, results, concurrentDict, opts, nil)
+		go workerWithContext(ctx, &wg, jobs, results, concurrentDict, opts, changedLines)
 	}
 
 	go func() {
@@ -69,8 +81,12 @@ func runCheckerOnFilesWithContext(ctx context.Context, files []string, concurren
 	var processed atomic.Int64 // total results received (success + error)
 	var errored atomic.Int64   // results that had errors
 	progressDone := make(chan struct{})
+	progressExited := make(chan struct{})
 	if showProgress {
-		go renderProgressBar(totalFiles, &processed, &errored, progressDone)
+		go func() {
+			defer close(progressExited)
+			renderProgressBar(totalFiles, &processed, &errored, progressDone)
+		}()
 	}
 
 	allTypos := make(CheckResults)
@@ -89,6 +105,7 @@ func runCheckerOnFilesWithContext(ctx context.Context, files []string, concurren
 
 	close(progressDone)
 	if showProgress {
+		<-progressExited
 		fmt.Fprint(os.Stderr, "\r"+strings.Repeat(" ", 80)+"\r")
 	}
 
@@ -109,61 +126,20 @@ func runGitDiffChecker(ref string, rootPath string, concurrentDict *ConcurrentDi
 }
 
 func runGitDiffCheckerWithContext(ctx context.Context, ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool, opts scanOptions) (CheckResults, error) {
-	raw, err := gitDiffFilesWithContext(ctx, ref)
+	files, err := filterDiffFiles(ctx, ref, rootPath, excludePatterns, verbose)
 	if err != nil {
-		return nil, fmt.Errorf("git-diff: %w", err)
-	}
-	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
-	if rootPath != "." {
-		filtered := raw[:0]
-		for _, p := range raw {
-			pNorm := filepath.ToSlash(filepath.Clean(p))
-			if pNorm == rootPath || strings.HasPrefix(pNorm, rootPath+"/") {
-				filtered = append(filtered, p)
-			}
-		}
-		raw = filtered
-	}
-	patterns := mergeDefaultExcludes(excludePatterns)
-	var files []string
-	for _, p := range raw {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-		gate, err := classifyFile(p, patterns)
-		switch gate {
-		case fileExcludeErr:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", p, err)
-			}
-		case fileExcluded:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Skipping excluded file: %s\n", p)
-			}
-		case fileBinaryErr:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Error checking if file is binary %q: %v\n", p, err)
-			}
-		case fileBinary:
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", p)
-			}
-		default:
-			files = append(files, p)
-		}
-	}
-	if verbose {
-		fmt.Fprintf(os.Stderr, "git-diff: %d file(s) to check\n", len(files))
+		return nil, err
 	}
 	return runCheckerOnFilesWithContext(ctx, files, concurrentDict, verbose, opts)
 }
 
-func runGitDiffCheckerWithHunks(ctx context.Context, ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool, changedLines ChangedLines, opts scanOptions) (CheckResults, error) {
+// filterDiffFiles resolves the git-diff file list for ref, scopes it to
+// rootPath, and drops excluded/binary files with the same rules as a
+// directory walk. Shared by the full-file and hunk-scoped runners.
+func filterDiffFiles(ctx context.Context, ref, rootPath string, excludePatterns []string, verbose bool) ([]string, error) {
 	raw, err := gitDiffFilesWithContext(ctx, ref)
 	if err != nil {
-		return nil, fmt.Errorf("git-diff: %w", err)
+		return nil, fmt.Errorf("resolving git-diff files: %w", err)
 	}
 	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
 	if rootPath != "." {
@@ -177,7 +153,7 @@ func runGitDiffCheckerWithHunks(ctx context.Context, ref string, rootPath string
 		raw = filtered
 	}
 	patterns := mergeDefaultExcludes(excludePatterns)
-	var files []string
+	files := []string{}
 	for _, p := range raw {
 		select {
 		case <-ctx.Done():
@@ -208,6 +184,14 @@ func runGitDiffCheckerWithHunks(ctx context.Context, ref string, rootPath string
 	}
 	if verbose {
 		fmt.Fprintf(os.Stderr, "git-diff: %d file(s) to check\n", len(files))
+	}
+	return files, nil
+}
+
+func runGitDiffCheckerWithHunks(ctx context.Context, ref string, rootPath string, concurrentDict *ConcurrentDictionary, excludePatterns []string, verbose bool, changedLines ChangedLines, opts scanOptions) (CheckResults, error) {
+	files, err := filterDiffFiles(ctx, ref, rootPath, excludePatterns, verbose)
+	if err != nil {
+		return nil, err
 	}
 	return runCheckerOnFilesWithHunks(ctx, files, concurrentDict, verbose, changedLines, opts)
 }
@@ -230,61 +214,7 @@ func runCheckerOnFilesWithHunks(ctx context.Context, files []string, concurrentD
 			return make(CheckResults), nil
 		}
 	}
-	totalFiles := len(files)
-	numWorkers := runtime.NumCPU()
-	jobBuf := numWorkers * 10
-	if jobBuf < 100 {
-		jobBuf = 100
-	}
-	jobs := make(chan string, jobBuf)
-	results := make(chan CheckResult, jobBuf)
-	var wg sync.WaitGroup
-	for range numWorkers {
-		wg.Add(1)
-		go workerWithContext(ctx, &wg, jobs, results, concurrentDict, opts, changedLines)
-	}
-	go func() {
-		defer close(jobs)
-		for _, path := range files {
-			select {
-			case <-ctx.Done():
-				return
-			case jobs <- path:
-			}
-		}
-	}()
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-	showProgress := totalFiles > 1 && isStderrTerminal()
-	var processed atomic.Int64
-	var errored atomic.Int64
-	progressDone := make(chan struct{})
-	if showProgress {
-		go renderProgressBar(totalFiles, &processed, &errored, progressDone)
-	}
-	allTypos := make(CheckResults)
-	var errs []error
-	for result := range results {
-		processed.Add(1)
-		if result.Err != nil {
-			errored.Add(1)
-			errs = append(errs, result.Err)
-			continue
-		}
-		if len(result.Typos) > 0 {
-			allTypos[result.FilePath] = result.Typos
-		}
-	}
-	close(progressDone)
-	if showProgress {
-		fmt.Fprint(os.Stderr, "\r"+strings.Repeat(" ", 80)+"\r")
-	}
-	if len(errs) > 0 {
-		return allTypos, errors.Join(errs...)
-	}
-	return allTypos, nil
+	return runPool(ctx, files, concurrentDict, opts, changedLines)
 }
 
 // collectFiles walks rootPath and returns a list of file paths that should be
@@ -294,7 +224,7 @@ func collectFiles(rootPath string, excludePatterns []string, verbose bool) ([]st
 }
 
 func collectFilesWithContext(ctx context.Context, rootPath string, excludePatterns []string, verbose bool) ([]string, error) {
-	var files []string
+	files := []string{}
 	patterns := mergeDefaultExcludes(excludePatterns)
 	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		select {
@@ -308,7 +238,7 @@ func collectFilesWithContext(ctx context.Context, rootPath string, excludePatter
 			// keep scanning the rest, matching the per-file error aggregation
 			// that already keeps partial results.
 			if path == rootPath {
-				return err
+				return fmt.Errorf("walking %q: %w", rootPath, err)
 			}
 			fmt.Fprintf(os.Stderr, "Error accessing path %q (skipping): %v\n", path, err)
 			return nil
@@ -395,6 +325,15 @@ func isStderrTerminal() bool {
 }
 func workerWithContext(ctx context.Context, wg *sync.WaitGroup, jobs <-chan string, results chan<- CheckResult, dictionary *ConcurrentDictionary, opts scanOptions, changedLines ChangedLines) {
 	defer wg.Done()
+	// A panicking file must not kill the whole pool; report it like any
+	// other per-file error so errors.Join still returns partial results.
+	defer func() {
+		// Blocking send is safe: recover runs before wg.Done (LIFO), so the
+		// sink has not closed results yet.
+		if r := recover(); r != nil {
+			results <- CheckResult{FilePath: "worker", Err: fmt.Errorf("worker panic: %v", r)}
+		}
+	}()
 	for path := range jobs {
 		fileOpts := opts
 		if changedLines != nil {
@@ -411,7 +350,8 @@ func workerWithContext(ctx context.Context, wg *sync.WaitGroup, jobs <-chan stri
 		}
 		var typos []MisspelledWord
 		var err error
-		if changedLines == nil && fileOpts.ChangedLines == nil && opts.MinWordLength == 0 && !opts.Verbose {
+		useFastPath := changedLines == nil && fileOpts.ChangedLines == nil && opts.MinWordLength == 0 && !opts.Verbose
+		if useFastPath {
 			typos, err = checkFileFunc(path, dictionary)
 		} else {
 			typos, err = checkFileWithOptions(path, dictionary, fileOpts)

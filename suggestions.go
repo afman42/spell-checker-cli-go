@@ -15,6 +15,8 @@ type BKNode struct {
 }
 
 // BKTree implements a Burkhard-Keller tree for efficient fuzzy string matching.
+// A tree must not be modified after publication to concurrent readers:
+// concurrent Search is safe only on a frozen tree (use via ConcurrentDictionary).
 type BKTree struct {
 	Root *BKNode
 }
@@ -61,9 +63,9 @@ func (tree *BKTree) Add(word string) {
 // Search finds words within a given edit distance threshold, paired with distance.
 func (tree *BKTree) Search(word string, threshold int) []scoredWord {
 	if tree.Root == nil {
-		return nil
+		return []scoredWord{}
 	}
-	var results []scoredWord
+	results := []scoredWord{}
 	tree.searchRecursive(tree.Root, word, threshold, &results)
 	return results
 }
@@ -247,11 +249,11 @@ func commonPrefixLen(a, b string) int {
 // simpleGenerateSuggestions is the brute-force implementation for small dictionaries.
 func simpleGenerateSuggestions(word string, dictionary map[string]struct{}) []string {
 	if len(word) > maxSuggestionWordLength {
-		return nil
+		return []string{}
 	}
 	lowerWord := strings.ToLower(word)
 
-	var scored []scoredWord
+	scored := []scoredWord{}
 	for dictWord := range dictionary {
 		// Optimization: skip comparing words with a length difference greater than the threshold.
 		diff := len(dictWord) - len(lowerWord)

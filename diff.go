@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,16 +16,31 @@ import (
 // If ref is "staged", it runs `git diff --cached --name-only`; otherwise
 // `git diff --name-only <ref>`.  Returns the files that exist on disk and
 // are tracked.  Errors from git are returned to the caller.
+//
+// ErrEmptyGitRef and ErrInvalidGitRef are returned for bad refs; match them
+// with errors.Is.
+var (
+	ErrEmptyGitRef   = errors.New("git-diff: empty ref")
+	ErrInvalidGitRef = errors.New("git-diff: invalid ref")
+)
+
+func validateGitRef(ref string) error {
+	if ref == "" {
+		return ErrEmptyGitRef
+	}
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("%w: %q", ErrInvalidGitRef, ref)
+	}
+	return nil
+}
+
 func gitDiffFiles(ref string) ([]string, error) {
 	return gitDiffFilesWithContext(context.Background(), ref)
 }
 
 func gitDiffFilesWithContext(ctx context.Context, ref string) ([]string, error) {
-	if ref == "" {
-		return nil, fmt.Errorf("git-diff: empty ref")
-	}
-	if strings.HasPrefix(ref, "-") {
-		return nil, fmt.Errorf("git-diff: invalid ref %q", ref)
+	if err := validateGitRef(ref); err != nil {
+		return nil, err
 	}
 	var cmd *exec.Cmd
 	if ref == "staged" {
@@ -36,13 +52,13 @@ func gitDiffFilesWithContext(ctx context.Context, ref string) ([]string, error) 
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git diff failed: %w: %s", err, strings.TrimSpace(errBuf.String()))
+		return nil, fmt.Errorf("git diff failed: %s: %w", strings.TrimSpace(errBuf.String()), err)
 	}
 	trimmed := strings.TrimSpace(out.String())
 	if trimmed == "" {
 		return []string{}, nil
 	}
-	var files []string
+	files := []string{}
 	for _, line := range strings.Split(trimmed, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -52,9 +68,6 @@ func gitDiffFilesWithContext(ctx context.Context, ref string) ([]string, error) 
 			files = append(files, line)
 		}
 	}
-	if files == nil {
-		files = []string{}
-	}
 	return files, nil
 }
 
@@ -62,6 +75,8 @@ func gitDiffFilesWithContext(ctx context.Context, ref string) ([]string, error) 
 var hunkHeaderRE = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
 
 // ChangedLines maps file path -> set of added line numbers (1-based, new-file side).
+// It is read-only after parseChangedLines; concurrent reads are safe, writes
+// require external synchronization.
 type ChangedLines map[string]map[int]struct{}
 
 // parseChangedLines parses unified diff output (git diff --unified=0) and
@@ -78,6 +93,7 @@ func parseChangedLines(diffText string) ChangedLines {
 			continue
 		}
 		if m := hunkHeaderRE.FindStringSubmatch(rawLine); m != nil {
+			// m[1]/m[2] are \d+ per hunkHeaderRE, Atoi cannot fail.
 			start, _ := strconv.Atoi(m[1])
 			count := 1
 			if m[2] != "" {
@@ -99,11 +115,8 @@ func parseChangedLines(diffText string) ChangedLines {
 
 // gitDiffHunks returns the unified diff with zero context lines for the given ref.
 func gitDiffHunks(ctx context.Context, ref string) (string, error) {
-	if ref == "" {
-		return "", fmt.Errorf("git-diff: empty ref")
-	}
-	if strings.HasPrefix(ref, "-") {
-		return "", fmt.Errorf("git-diff: invalid ref %q", ref)
+	if err := validateGitRef(ref); err != nil {
+		return "", err
 	}
 	var cmd *exec.Cmd
 	if ref == "staged" {
@@ -115,7 +128,7 @@ func gitDiffHunks(ctx context.Context, ref string) (string, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git diff hunks failed: %w: %s", err, strings.TrimSpace(errBuf.String()))
+		return "", fmt.Errorf("git diff hunks failed: %s: %w", strings.TrimSpace(errBuf.String()), err)
 	}
 	return out.String(), nil
 }

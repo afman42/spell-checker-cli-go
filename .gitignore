@@ -14,3 +14,4 @@ graphify*
 # Local opencode tooling (plugins, node_modules, etc.)
 .opencode/
 *.test
+.agents/

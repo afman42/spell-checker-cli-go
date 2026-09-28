@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,12 @@ import (
 // treeCacheVersion is bumped whenever the serialized format or BK-tree
 // structure changes, so a stale on-disk tree is never loaded.
 const treeCacheVersion = 1
+
+// maxTreeCacheBytes caps the on-disk BK-tree cache size. The cache file is
+// keyed by dictionary hash and written by this tool, but it lives in the
+// user's cache dir where another local process could corrupt or replace it; a
+// hostile gob length field must not force a huge allocation during decode.
+const maxTreeCacheBytes = 32 << 20 // 32 MiB
 
 // treeCacheKey derives a stable identity from the dictionary's exact contents,
 // so a persisted tree is reused only for identical dictionaries. Words are
@@ -35,7 +42,7 @@ func treeCacheKey(dict map[string]struct{}) string {
 		h.Write(lenBuf[:])
 		h.Write([]byte(w))
 	}
-	return fmt.Sprintf("%x", h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // treeCachePath returns the cache file path for a dictionary, or "" when no
@@ -52,28 +59,22 @@ func treeCachePath(dict map[string]struct{}) string {
 	return filepath.Join(dir, fmt.Sprintf("bktree-v%d-%s.gob", treeCacheVersion, treeCacheKey(dict)))
 }
 
-// maxTreeCacheBytes caps the on-disk BK-tree cache size. The cache file is
-// keyed by dictionary hash and written by this tool, but it lives in the
-// user's cache dir where another local process could corrupt or replace it; a
-// hostile gob length field must not force a huge allocation during decode.
-const maxTreeCacheBytes = 32 << 20 // 32 MiB
-
 // readBKTreeCacheAt decodes a persisted tree from path.
 func readBKTreeCacheAt(path string) (*BKTree, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not open cache %s: %w", path, err)
 	}
 	defer f.Close()
 	var tree BKTree
 	if err := gob.NewDecoder(io.LimitReader(f, maxTreeCacheBytes+1)).Decode(&tree); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding cache %s: %w", path, err)
 	}
 	// Post-decode sanity check: a malicious or corrupt cache must not
 	// propagate a tree with absurd node counts. The embedded dictionary
 	// has ~100k words; anything orders of magnitude larger is suspect.
 	if tree.Root != nil && len(tree.Root.Children) > 1_000_000 {
-		return nil, fmt.Errorf("cache rejected: implausible tree structure")
+		return nil, ErrImplausibleTreeCacheStructure
 	}
 	return &tree, nil
 }
@@ -84,7 +85,7 @@ func readBKTreeCacheAt(path string) (*BKTree, error) {
 func writeBKTreeCacheAt(path string, tree *BKTree) error {
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(tree); err != nil {
-		return err
+		return fmt.Errorf("encoding BK-tree for %s: %w", path, err)
 	}
 	return writeFileAtomic(path, buf.String(), false)
 }

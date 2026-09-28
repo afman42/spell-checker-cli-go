@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -44,10 +45,12 @@ func runFixer(results CheckResults, dryRun bool) (totalFixed, totalSkipped int, 
 	paths := sortedResultPaths(results)
 
 	filesChanged := 0
+	var errs []error
 	for _, path := range paths {
 		res, err := fixFile(path, results[path], dryRun)
 		if err != nil {
-			return totalFixed, totalSkipped, fmt.Errorf("fixing %s: %w", path, err)
+			errs = append(errs, fmt.Errorf("fixing %q: %w", path, err))
+			continue
 		}
 		totalFixed += res.Fixes
 		totalSkipped += res.Skipped
@@ -55,6 +58,9 @@ func runFixer(results CheckResults, dryRun bool) (totalFixed, totalSkipped int, 
 			filesChanged++
 		}
 		reportFixFile(res, dryRun)
+	}
+	if len(errs) > 0 {
+		return totalFixed, totalSkipped, errors.Join(errs...)
 	}
 
 	verb := "Fixed"
@@ -90,7 +96,7 @@ func buildFixRepl(typos []MisspelledWord, res *FixResult) map[fixKey]string {
 			res.Skipped++
 			continue
 		}
-		repl[fixKey{t.LineNumber, t.Column}] = t.Suggestions[0]
+		repl[fixKey{line: t.LineNumber, column: t.Column}] = t.Suggestions[0]
 	}
 	return repl
 }
@@ -101,10 +107,9 @@ func buildFixRepl(typos []MisspelledWord, res *FixResult) map[fixKey]string {
 func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error) {
 	res := FixResult{FilePath: path}
 	repl := buildFixRepl(typos, &res)
-
 	in, err := os.Open(path)
 	if err != nil {
-		return res, err
+		return res, fmt.Errorf("could not open %q: %w", path, err)
 	}
 	defer in.Close()
 
@@ -116,7 +121,7 @@ func fixFile(path string, typos []MisspelledWord, dryRun bool) (FixResult, error
 	lr := newLineReader(in, maxLineLen)
 	lr.setOverlong(&out)
 	if err := rewriteLines(lr, &out, repl, &res); err != nil {
-		return res, err
+		return res, fmt.Errorf("fixing %q: %w", path, err)
 	}
 
 	if dryRun || res.Fixes == 0 {
@@ -136,10 +141,10 @@ func fixStdin(r io.Reader, typos []MisspelledWord) (fixed, skipped int, err erro
 	lr := newLineReader(r, maxLineLen)
 	lr.setOverlong(&out)
 	if err := rewriteLines(lr, &out, repl, &res); err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("reading stdin: %w", err)
 	}
 	if _, err := io.WriteString(os.Stdout, out.String()); err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("writing fixed stdin to stdout: %w", err)
 	}
 	return res.Fixes, res.Skipped, nil
 }
@@ -151,7 +156,7 @@ func fixStdin(r io.Reader, typos []MisspelledWord) (fixed, skipped int, err erro
 func rewriteLines(lr *lineReader, out *strings.Builder, repl map[fixKey]string, res *FixResult) error {
 	for {
 		line, lineNumber, err := lr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
@@ -182,7 +187,7 @@ func replaceLine(line string, lineNumber int, repl map[fixKey]string, res *FixRe
 		// MisspelledWord.Column so only the exact flagged token is replaced.
 		col := utf8.RuneCountInString(line[:m[0]]) + 1
 		word := line[m[0]:m[1]]
-		if r, ok := repl[fixKey{lineNumber, col}]; ok {
+		if r, ok := repl[fixKey{line: lineNumber, column: col}]; ok {
 			b.WriteString(line[last:m[0]])
 			b.WriteString(matchCase(word, r))
 			last = m[1]
@@ -224,37 +229,36 @@ func writeFileAtomic(path, content string, preserveMode bool) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".spellfix-*")
 	if err != nil {
-		return err
+		return fmt.Errorf("could not create temp file in %q: %w", dir, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op if rename succeeds
-
 	if _, err := io.WriteString(tmp, content); err != nil {
 		tmp.Close()
-		return err
+		return fmt.Errorf("writing temp file for %q: %w", path, err)
 	}
 	// Durability: flush the temp file's data to disk before swapping it in.
 	// Without this, a crash after rename can leave the target file empty
 	// because the rename is durable but the data write is not.
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return err
+		return fmt.Errorf("syncing temp file for %q: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return fmt.Errorf("closing temp file for %q: %w", path, err)
 	}
 
 	if preserveMode {
 		info, err := os.Stat(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("could not stat %q: %w", path, err)
 		}
 		if err := os.Chmod(tmpName, info.Mode()); err != nil {
-			return err
+			return fmt.Errorf("could not chmod %q: %w", tmpName, err)
 		}
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return err
+		return fmt.Errorf("could not rename %q to %q: %w", tmpName, path, err)
 	}
 	if dirFile, err := os.Open(dir); err == nil {
 		_ = dirFile.Sync()

@@ -22,9 +22,9 @@ func loadSpellignore(cwd string) []string {
 			// corruption) must not silently drop user exclusions.
 			fmt.Fprintf(os.Stderr, "Warning: could not read .spellignore: %v\n", err)
 		}
-		return nil
+		return []string{}
 	}
-	var patterns []string
+	patterns := []string{}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {

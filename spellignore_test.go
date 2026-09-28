@@ -24,12 +24,12 @@ func TestLoadSpellignore(t *testing.T) {
 	}
 }
 
-// TestLoadSpellignoreMissing verifies a missing .spellignore yields nil, not
+// TestLoadSpellignoreMissing verifies a missing .spellignore yields empty, not
 // an error, so its absence doesn't break scans.
 func TestLoadSpellignoreMissing(t *testing.T) {
 	got := loadSpellignore(t.TempDir())
-	if got != nil {
-		t.Errorf("loadSpellignore = %q, want nil", got)
+	if len(got) != 0 {
+		t.Errorf("loadSpellignore = %q, want empty", got)
 	}
 }
 

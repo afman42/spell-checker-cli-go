@@ -11,6 +11,11 @@ linters:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+        # Best-effort stdout notices (summaries, usage, confirmations):
+        # a broken pipe here must not fail the scan.
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
         # Best-effort: temp-file cleanup after a successful rename is a no-op,
         # and the overlong-line sink is a diagnostic tap, not a data path.
         - os.Remove

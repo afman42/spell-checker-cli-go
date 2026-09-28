@@ -51,7 +51,7 @@ func parseEmbeddedDictionary(data []byte) (map[string]struct{}, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading embedded dictionary: %w", err)
+		return nil, fmt.Errorf("reading embedded dictionary: %w", err)
 	}
 	return dictionary, nil
 }
@@ -69,7 +69,7 @@ func parseDictionary(reader io.Reader) (map[string]struct{}, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("error reading dictionary record: %w", err)
+			return nil, fmt.Errorf("reading dictionary record: %w", err)
 		}
 		if len(record) > 0 {
 			dictionary[strings.ToLower(record[0])] = struct{}{}
@@ -97,7 +97,7 @@ func loadPersonalDictionary(path string, dictionary map[string]struct{}) (int, e
 	}
 
 	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("error reading personal dictionary: %w", err)
+		return 0, fmt.Errorf("reading personal dictionary: %w", err)
 	}
 
 	return count, nil
@@ -107,12 +107,11 @@ func loadPersonalDictionary(path string, dictionary map[string]struct{}) (int, e
 // lazily builds a BK-tree for efficient fuzzy suggestions on first use.
 type ConcurrentDictionary struct {
 	dict   map[string]struct{}
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	bkTree *BKTree
 	// suggestCache memoizes Suggest results per lowercase word. Suggestions
 	// are deterministic for a fixed dictionary, and the same typo typically
-	// recurs many times in a scan (or file). Bounded below; callers only read
-	// the returned slice, never mutate it.
+	// recurs many times in a scan (or file). Bounded below.
 	suggestCache map[string][]string
 }
 
@@ -127,27 +126,34 @@ const maxSuggestCacheEntries = 1024
 
 // NewConcurrentDictionary creates a new dictionary wrapper. The BK-tree is not
 // built here: it is deferred until the first Suggest call, so a run that finds
-// no typos never pays the build cost.
+// no typos never pays the build cost. The map is copied so later caller
+// mutations cannot race concurrent readers (concurrent map read+write is a
+// fatal runtime crash).
 func NewConcurrentDictionary(dict map[string]struct{}) *ConcurrentDictionary {
-	return &ConcurrentDictionary{dict: dict}
+	cp := make(map[string]struct{}, len(dict))
+	for w := range dict {
+		cp[w] = struct{}{}
+	}
+	return &ConcurrentDictionary{dict: cp}
 }
 
-// treeLocked returns the cached BK-tree, building it once on first access and
-// reusing one persisted on disk for identical dictionaries. Caller must NOT
-// hold cd.mu; the method handles locking internally and never holds the mutex
-// during disk IO or tree construction.
-func (cd *ConcurrentDictionary) treeLocked() *BKTree {
-	cd.mu.Lock()
+// ensureTree returns the cached BK-tree, building it once on first access and
+// reusing one persisted on disk for identical dictionaries. It handles locking
+// internally and never holds the mutex during disk IO or tree construction.
+// Call Warmup after construction (before spawning workers) to pay the build
+// once on a single goroutine instead of racing N workers on cold start.
+func (cd *ConcurrentDictionary) ensureTree() *BKTree {
+	cd.mu.RLock()
 	if cd.bkTree != nil {
 		t := cd.bkTree
-		cd.mu.Unlock()
+		cd.mu.RUnlock()
 		return t
 	}
 	if len(cd.dict) < bkTreeMinDictSize {
-		cd.mu.Unlock()
+		cd.mu.RUnlock()
 		return nil
 	}
-	cd.mu.Unlock()
+	cd.mu.RUnlock()
 	if cached := loadBKTreeCache(cd.dict); cached != nil {
 		cd.mu.Lock()
 		if cd.bkTree == nil {
@@ -178,6 +184,7 @@ func (cd *ConcurrentDictionary) Contains(word string) bool {
 // path) or falls back to brute-force for small dictionaries. Results are
 // memoized per word: the BK search is deterministic, and repeated occurrences
 // of the same typo (common in real scans) skip the expensive traversal.
+// The returned slice is a fresh copy per call; callers may use or mutate it.
 func (cd *ConcurrentDictionary) Suggest(word string) []string {
 	if len(word) > maxSuggestionWordLength {
 		return nil
@@ -187,12 +194,14 @@ func (cd *ConcurrentDictionary) Suggest(word string) []string {
 	if cd.suggestCache == nil {
 		cd.suggestCache = make(map[string][]string, 16)
 	}
+	cd.mu.Unlock()
+	cd.mu.RLock()
 	if cached, ok := cd.suggestCache[lower]; ok {
-		cd.mu.Unlock()
+		cd.mu.RUnlock()
 		return append([]string{}, cached...)
 	}
-	cd.mu.Unlock()
-	tree := cd.treeLocked()
+	cd.mu.RUnlock()
+	tree := cd.ensureTree()
 
 	var sug []string
 	if tree != nil {
@@ -206,4 +215,10 @@ func (cd *ConcurrentDictionary) Suggest(word string) []string {
 	}
 	cd.mu.Unlock()
 	return append([]string{}, sug...)
+}
+
+// Warmup builds the suggestion tree now so the first worker pool does not pay
+// a cold-start race. Cheap for small dictionaries (no tree built).
+func (cd *ConcurrentDictionary) Warmup() {
+	cd.ensureTree()
 }

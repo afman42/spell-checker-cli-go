@@ -40,6 +40,7 @@ func runWatcherWithContext(ctx context.Context, rootPath string, dictionary map[
 	}
 	fmt.Fprintln(outW, "\nWatching for changes... (Ctrl+C to stop)")
 	eventCh := make(chan string, 100)
+	defer close(eventCh)
 	go debounceAndProcessWithContext(ctx, eventCh, concurrentDict, outW, errW)
 	for {
 		select {
@@ -63,14 +64,14 @@ func addDirsToWatcher(watcher *fsnotify.Watcher, rootPath string, excludePattern
 	patterns := mergeDefaultExcludes(excludePatterns)
 	return filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("watching %s: %w", path, err)
 		}
 		if !info.IsDir() {
 			return nil
 		}
 		excluded, err := shouldExclude(path, patterns)
 		if err != nil {
-			return err
+			return fmt.Errorf("checking exclude for %s: %w", path, err)
 		}
 		if excluded {
 			return filepath.SkipDir
@@ -99,7 +100,11 @@ func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh c
 	// A new directory: watch it (and any subtree it already contains).
 	if info.IsDir() {
 		excluded, err := shouldExclude(event.Name, patterns)
-		if err == nil && !excluded {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking exclude pattern on %q: %v\n", event.Name, err)
+			return
+		}
+		if !excluded {
 			if err := addDirsToWatcher(watcher, event.Name, patterns); err != nil {
 				fmt.Fprintf(os.Stderr, "Error watching new directory %s: %v\n", event.Name, err)
 			}
@@ -107,7 +112,10 @@ func handleWatchEvent(event fsnotify.Event, watcher *fsnotify.Watcher, eventCh c
 		return
 	}
 
-	if gate, _ := classifyFile(event.Name, patterns); gate != fileOK {
+	if gate, err := classifyFile(event.Name, patterns); gate != fileOK {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking %q: %v\n", event.Name, err)
+		}
 		return
 	}
 
@@ -128,16 +136,43 @@ func debounceAndProcess(eventCh <-chan string, dict *ConcurrentDictionary, out i
 }
 
 func debounceAndProcessWithContext(ctx context.Context, eventCh <-chan string, dict *ConcurrentDictionary, out io.Writer, errW io.Writer) {
+	defer func() {
+		// A panic here would silently kill the watch loop; report it instead.
+		if r := recover(); r != nil {
+			fmt.Fprintf(errW, "watcher panic: %v\n", r)
+		}
+	}()
 	pending := make(map[string]struct{})
 	var timer *time.Timer
+	// resetTimer re-arms the single debounce timer instead of allocating a
+	// new one per event.
+	resetTimer := func() {
+		if timer == nil {
+			timer = time.NewTimer(debouncePeriod)
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(debouncePeriod)
+	}
 	for {
 		if timer == nil {
 			select {
 			case <-ctx.Done():
 				return
-			case path := <-eventCh:
+			case path, ok := <-eventCh:
+				if !ok {
+					if len(pending) > 0 {
+						processBatch(pending, dict, out)
+					}
+					return
+				}
 				pending[path] = struct{}{}
-				timer = time.NewTimer(debouncePeriod)
+				resetTimer()
 				continue
 			}
 		}
@@ -150,15 +185,18 @@ func debounceAndProcessWithContext(ctx context.Context, eventCh <-chan string, d
 				timer.Stop()
 			}
 			return
-		case path := <-eventCh:
-			pending[path] = struct{}{}
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
+		case path, ok := <-eventCh:
+			if !ok {
+				if len(pending) > 0 {
+					processBatch(pending, dict, out)
 				}
+				if timer != nil {
+					timer.Stop()
+				}
+				return
 			}
-			timer = time.NewTimer(debouncePeriod)
+			pending[path] = struct{}{}
+			resetTimer()
 		case <-timer.C:
 			processBatch(pending, dict, out)
 			pending = make(map[string]struct{})
